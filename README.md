@@ -33,4 +33,6 @@ This is another convenience function for the same reason. Next will be an exampl
 >  bool    ok = db.get( (void*)lf.data(), (u32)lf.length(), (void*)way.data(), (u32)way.length() );
 
 
+Here we can see the fundamental functions used to interface with the db. An arbitrary bytes buffer is given for the key and another for the value.  Keep in mind here that get() can fail, since another thread can delete or change the key being read between the call to len() (which gets the number of bytes held in the value of the given key) and the call to get().
+Not shown is del(), which will take a key and delete it.
 
