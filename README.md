@@ -37,6 +37,6 @@ Here we can see the fundamental functions used to interface with the db. An arbi
 Not shown is del(), which will take a key and delete it.
 
 
-### Inside simdb.hpp there is a more extensive explanation of the inner working and how it achieves lock free concurrency
+#### Inside simdb.hpp there is a more extensive explanation of the inner working and how it achieves lock free concurrency
 
 
