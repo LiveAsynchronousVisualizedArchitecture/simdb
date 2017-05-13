@@ -26,9 +26,9 @@ db.put("lock free", "is the way to be");
 
 Simdb works with arbitrary byte buffers for both keys and values. This example uses a convenience function to make a common case easier. 
 
-'''cpp 
+```cpp 
 string s = db.get("lock free");
-'''
+```
 
 This is another convenience function for the same reason. Next will be an example of the direct functions that these wrap.
 
