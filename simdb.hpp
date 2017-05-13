@@ -15,9 +15,6 @@
   limitations under the License.
 */
 
-// todo: move all type aliases into classes
-// todo: test with external process
-
 /*
  SimDB
 
@@ -188,18 +185,7 @@
 #endif
 
 namespace {
-  using    u8   =   uint8_t;
-  using   u32   =   uint32_t;
-  using   u64   =   uint64_t;
-  using    i8   =   int8_t;
-  using   i32   =   int32_t;
-  using   i64   =   int64_t;
-  using  au64   =   std::atomic<u64>;
-  using  au32   =   std::atomic<u32>;
-
   enum Match { MATCH_FALSE=0, MATCH_TRUE=1, MATCH_REMOVED=-1  };
-
-  struct _u128 { u64 lo; u64 hi; };
 
   template<class T>
   class lava_noop
@@ -207,49 +193,19 @@ namespace {
     void operator()(){}
   };
 
-  inline u64 fnv_64a_buf(void const *const buf, u64 len)                              // sbassett - I know basically nothing about hash functions and there is likely a better one out there 
+  inline uint64_t fnv_64a_buf(void const *const buf, uint64_t len)                              // sbassett - I know basically nothing about hash functions and there is likely a better one out there 
   {
-    u64 hval = 0xCBF29CE484222325;
-    u8*   bp = (u8*)buf;	             // start of buffer 
-    u8*   be = bp + len;		           // beyond end of buffer 
+    uint64_t hval = 0xCBF29CE484222325;
+    uint8_t*   bp = (uint8_t*)buf;	             // start of buffer 
+    uint8_t*   be = bp + len;		           // beyond end of buffer 
     while(bp < be){                    // FNV-1a hash each octet of the buffer
-      hval ^= (u64)*bp++;              // xor the bottom with the current octet */
+      hval ^= (uint64_t)*bp++;              // xor the bottom with the current octet */
       hval += (hval << 1) + (hval << 4) + (hval << 5) +
               (hval << 7) + (hval << 8) + (hval << 40);
     }
     return hval;
   }
   
-  inline bool compex128(
-    i64*           _Destination, 
-    i64           _ExchangeHigh, 
-    i64            _ExchangeLow, 
-    i64*      _CompareAndResult)
-  {
-    //assert( ((u64)_Destination) % 16 == 0 );
-    #ifdef _MSC_VER
-      return _InterlockedCompareExchange128(
-       _Destination,
-       _ExchangeHigh,
-       _ExchangeLow,
-       _CompareAndResult) == 1;
-     #else
-       //__int128 ex;
-       //u64*  ex64 = (u64*)&ex;
-       //ex64[0] = _ExchangeLow;
-       //ex64[1] = _ExchangeHigh;
-
-       //__sync_val_compare_and_swap(_Destination, );
-
-       //_u128 ex; 
-       //ex.hi = _ExchangeHigh;
-       //ex.lo = _ExchangeLow;
-       //return __atomic_compare_exchange(_Destination, _CompareAndResult, &ex, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
-
-       return true; // todo: change this to work for gcc and clang
-     #endif
-  }
-
   inline void prefetch1(char const* const p)
   {
     #ifdef _MSC_VER                              // if msvc or intel compilers
@@ -260,12 +216,6 @@ namespace {
 
     #endif
   }
-
-  #ifdef _WIN32
-    using  u128 = __declspec(align(128)) _u128;
-  #else
-    using  u128 = _u128;
-  #endif
 
   #ifdef _WIN32
     typedef struct _UNICODE_STRING {
@@ -336,33 +286,33 @@ namespace {
 
     struct OBJECT_DIRECTORY_INFORMATION { UNICODE_STRING name; UNICODE_STRING type; };
 
-    auto      GetLastErrorStdStr() -> std::string
-    {
-      DWORD error = GetLastError();
-      if (error)
-      {
-        LPVOID lpMsgBuf;
-        DWORD bufLen = FormatMessage(
-            FORMAT_MESSAGE_ALLOCATE_BUFFER | 
-            FORMAT_MESSAGE_FROM_SYSTEM |
-            FORMAT_MESSAGE_IGNORE_INSERTS,
-            NULL,
-            error,
-            MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-            (LPTSTR) &lpMsgBuf,
-            0, NULL );
-        if (bufLen)
-        {
-          LPCSTR lpMsgStr = (LPCSTR)lpMsgBuf;
-          std::string result(lpMsgStr, lpMsgStr+bufLen);
-      
-          LocalFree(lpMsgBuf);
-
-          return result;
-        }
-      }
-      return std::string();
-    }
+    //auto      GetLastErrorStdStr() -> std::string
+    //{
+    //  DWORD error = GetLastError();
+    //  if (error)
+    //  {
+    //    LPVOID lpMsgBuf;
+    //    DWORD bufLen = FormatMessage(
+    //        FORMAT_MESSAGE_ALLOCATE_BUFFER | 
+    //        FORMAT_MESSAGE_FROM_SYSTEM |
+    //        FORMAT_MESSAGE_IGNORE_INSERTS,
+    //        NULL,
+    //        error,
+    //        MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+    //        (LPTSTR) &lpMsgBuf,
+    //        0, NULL );
+    //    if (bufLen)
+    //    {
+    //      LPCSTR lpMsgStr = (LPCSTR)lpMsgBuf;
+    //      std::string result(lpMsgStr, lpMsgStr+bufLen);
+    //  
+    //      LocalFree(lpMsgBuf);
+    //
+    //      return result;
+    //    }
+    //  }
+    //  return std::string();
+    //}
     PVOID  GetLibraryProcAddress(PSTR LibraryName, PSTR ProcName)
     {
       return GetProcAddress(GetModuleHandleA(LibraryName), ProcName);
@@ -519,42 +469,45 @@ namespace {
 
 template<class T> 
 class    lava_vec
+{
+public:
+  using u64   =   uint64_t;
+
+private:
+  void* p;
+
+  void  set_sizeBytes(u64 sb){ ((u64*)p)[-1] = sb; }                                // an offset of -2 should be the first 8 bytes, which store the size in bytes of the whole memory span of this lava_vec
+
+public:
+  static u64 sizeBytes(u64 count)                                                   // sizeBytes is meant to take the same arguments as a constructor and return the total number of bytes to hold the entire stucture given those arguments 
   {
-  private:
-    void* p;
+    return sizeof(u64) + count*sizeof(T);
+  }
 
-    void  set_sizeBytes(u64 sb){ ((u64*)p)[-1] = sb; }                                // an offset of -2 should be the first 8 bytes, which store the size in bytes of the whole memory span of this lava_vec
-
-  public:
-    static u64 sizeBytes(u64 count)                                                   // sizeBytes is meant to take the same arguments as a constructor and return the total number of bytes to hold the entire stucture given those arguments 
-    {
-      return sizeof(u64) + count*sizeof(T);
+  lava_vec(){}
+  lava_vec(void*  addr, u64 count, bool owner=true) :
+    p( ((u64*)addr) + 1 )
+  {
+    if(owner){
+      set_sizeBytes( lava_vec::sizeBytes(count) );
     }
+  }
+  lava_vec(void*  addr) : p( ((u64*)addr) + 2 ) {}
+  lava_vec(lava_vec const&)       = delete;
+  void operator=(lava_vec const&) = delete;
 
-    lava_vec(){}
-    lava_vec(void*  addr, u64 count, bool owner=true) :
-      p( ((u64*)addr) + 1 )
-    {
-      if(owner){
-        set_sizeBytes( lava_vec::sizeBytes(count) );
-      }
-    }
-    lava_vec(void*  addr) : p( ((u64*)addr) + 2 ) {}
-    lava_vec(lava_vec const&)       = delete;
-    void operator=(lava_vec const&) = delete;
+  lava_vec(lava_vec&& rval){ p=rval.p; rval.p=nullptr; }
+  ~lava_vec(){}
 
-    lava_vec(lava_vec&& rval){ p=rval.p; rval.p=nullptr; }
-    ~lava_vec(){}
+  T& operator[](u64 i){ return data()[i]; }
 
-    T& operator[](u64 i){ return data()[i]; }
-
-    T*        data(){ return (T*)p; }
-    u64  sizeBytes() const { return ((u64*)p)[0]; }                                    // first 8 bytes should be the total size of the buffer in bytes
-    auto      addr() const -> void*
-    {
-      return p;
-    }
-  };
+  T*        data(){ return (T*)p; }
+  u64  sizeBytes() const { return ((u64*)p)[0]; }                                    // first 8 bytes should be the total size of the buffer in bytes
+  auto      addr() const -> void*
+  {
+    return p;
+  }
+};
 class     CncrLst
 {
 // Internally this is an array of indices that makes a linked list
@@ -563,18 +516,19 @@ class     CncrLst
 // Uses the first 8 bytes that would normally store sizeBytes as the 64 bits of memory for the Head structure
 // Aligns the head on a 64 bytes boundary with the rest of the memory on a separate 64 byte boudary. This puts them on separate cache lines which should eliminate false sharing between cores when atomicallyaccessing the Head union (which will happen quite a bit) 
 public:
+  using     u32  =  uint32_t;
+  using     u64  =  uint64_t;
+  using    au64  =  std::atomic<u64>;
+  using ListVec  =  lava_vec<u32>;
+
   union Head
   {
     struct { u32 ver; u32 idx; };                           // ver is version, idx is index
     u64 asInt;
   };
   
-  using     u32  =  uint32_t;
-  using     u64  =  uint64_t;
-  using ListVec  =  lava_vec<u32>;
-
-  const static u32        LIST_END = 0xFFFFFFFF;
-  const static u32 NXT_VER_SPECIAL = 0xFFFFFFFF;
+  static const u32        LIST_END = 0xFFFFFFFF;
+  static const u32 NXT_VER_SPECIAL = 0xFFFFFFFF;
 
 private:
   ListVec     s_lv;
@@ -664,6 +618,14 @@ public:
 class     CncrStr                                                          // CncrStr is Concurrent Store 
 {
 public:
+  using      u8  =  uint8_t;
+  using     u32  =  uint32_t;
+  using     i32  =   int32_t;
+  using     u64  =  uint64_t;
+  using     i64  =   int64_t;
+  using    au32  =  std::atomic<u32>;
+  using    au64  =  std::atomic<u64>;
+
   union   VerIdx
   {
     struct { u32 idx; u32 version; }; 
@@ -702,7 +664,7 @@ public:
   using ai32        =  std::atomic<i32>;
   using BlockLists  =  lava_vec<BlkLst>;                                               // only the indices returned from the concurrent list are altered, and only one thread will deal with any single index at a time 
 
-  const static u32 LIST_END = CncrLst::LIST_END;
+  static const u32 LIST_END = CncrLst::LIST_END;
 
   static VerIdx      List_End()
   { 
@@ -1062,8 +1024,13 @@ public:
 class     CncrHsh
 {
 public:
-  using  VerIdx   = CncrStr::VerIdx;
-  using  BlkLst   = CncrStr::BlkLst;
+  using      u8  =   uint8_t;
+  using     u32  =  uint32_t;
+  using     u64  =  uint64_t;
+  using     i64  =   int64_t;
+  using    au64  =  std::atomic<u64>;
+  using  VerIdx  =  CncrStr::VerIdx;
+  using  BlkLst  =  CncrStr::BlkLst;
 
   struct VerIpd { u32 version, ipd; };                       // ipd is Ideal Position Distance
 
@@ -1111,11 +1078,7 @@ public:
   static u64              make64(u32 lo, u32 hi){ return (((u64)lo)<<32) | ((u64)hi); }
 
 private:
-  using Au32     =  std::atomic<u32>;
-  using Au64     =  std::atomic<u64>;
   using VerIdxs  =  lava_vec<VerIdx>;
-  using Mut      =  std::mutex;
-  using UnqLock  =  std::unique_lock<Mut>;
 
           u32       m_sz;
   mutable VerIdxs   s_vis;                         // s_vis is key value(s) - needs to be changed to versioned indices, m_vis
@@ -1158,53 +1121,6 @@ private:
     u32    ip = bl.hash % m_sz;                                                     // ip is Ideal Position
     u32   ipd = i>ip?  i-ip  :  m_sz - ip + i;
     return {bl.version, ipd};
-  }
-  bool          delDupe(u32 i)                 const                                // delete duplicate indices - l is left index, r is right index - will do something different depending on if the two slots are within 128 bit alignment or not
-  {
-    if(i%2==0)
-    {                                                                               // both indices are within a 128 bit boundary, so the 128 bit atomic can (and must) be used
-      i64 rgtDel, lftDel;  _u128 viDbl;
-      _u128* viDblAddr = (_u128*)&s_vis[i];                                         // find 128 bit offset address
-      viDbl            = *viDblAddr;                                                // if it isn't the same, the atomic compare exchange will load it atomically
-      do{
-        u32 l = hi32(viDbl.lo);
-        u32 r = lo32(viDbl.hi);                                           
-        if( (l==DELETED && r==EMPTY) ){ //|| (l==EMPTY && r==DELETED) ){
-          rgtDel = vi_i64( swp32(empty_vi().asInt) );
-          lftDel = vi_i64( empty_vi() );
-        }else if(l!=r || l>=DELETED){                                               // check if both the indices are the same and if they are, that they aren't both deleted or both empty 
-          return false;                     
-        }else{
-          u64 lftSwp = swp32(viDbl.hi);
-          lftDel     = *((i64*)&lftSwp);                                            // if both the indices are the same, make a new right side VerIdx with the idx set to DELETED
-          rgtDel     = vi_i64( deleted_vi() );                                      // interpret the u64 bits directly as a signed 64 bit integer instead
-        }
-      }while( !compex128( (i64*)viDblAddr, rgtDel, lftDel, (i64*)&viDbl) );         // then compare and swap for a version with the new right side VerIdx
-    }else
-    {
-      au64* idxDblAddr; u64 idxDbl, desired;
-      u32* leftAddr = ((u32*)(&s_vis[i]))+1;                                        // if the two VerIdxs are not in a 128 bit boundary, then use a 64 bit compare and swap to set the right side index to DELETED
-      idxDblAddr    = (au64*)leftAddr;                                              // increment the address by 4 bytes so that it lines up with the start of the two indices, then cast it to an atomic 64 bit unsigned integer for the compare and switch
-      idxDbl        = idxDblAddr->load();
-      do{
-        u32  l = hi32(idxDbl);
-        u32  r = lo32(idxDbl);
-        if( (l==DELETED && r==EMPTY) ){    //|| (l==EMPTY && r==DELETED) ){         // change the deleted key to empty if it is to the left of an empty slot and therefore at the end of a span
-          desired = make64(EMPTY, EMPTY);          
-        }else if(l!=r || l>=DELETED){
-          return false; 
-        }else{                                                                      // if the indices are the same then do the compare and swap
-          desired = make64(l, DELETED);                                             // make the new 64 bit integer with the right index set to DELETED
-        }
-      }while( !idxDblAddr->compare_exchange_strong(idxDbl, desired) );              // looping here would essentially mean that the indices change but are still identical to each other
-    }
-
-    return true;
-  }
-  void      visFromAddr(_u128* viDbl, VerIdx* out_left, VerIdx* out_right) const
-  {
-    out_left->asInt   =  swp32(viDbl->lo);
-    out_right->asInt  =  viDbl->hi;
   }
   VerIdx           prev(u32 i, u32* out_idx)   const
   {
@@ -1359,33 +1275,6 @@ public:
   u32           size()                         const { return m_sz; }
   auto          data()                         const -> void* { return s_vis.data(); }
   u64      sizeBytes()                         const { return s_vis.sizeBytes(); }
-  i64        swapNxt(u32   idx)                const
-  {
-    i64 retries = -1;
-    if(idx%2==0)
-    {                                                                 // if idx is even just use 128 bit atomic straight    
-      u128*  idxAddr  =  (u128*)( ((u64*)s_vis.addr())+idx );
-      u128   dblvi;                                                   // dblvi is double Version Index - it is used to point to two VerIdx structs at the same time 
-      u128   swpvi;                                                   // swpvi is swapped version index - the two indices swapped - this is the desired value 
-      do{           
-        ++retries;                                                    // this will need to swap the side of VerIdx too
-        memcpy(&dblvi, idxAddr, sizeof(dblvi));
-        swpvi = { swp32(idxAddr->lo), swp32(idxAddr->hi) };           // not needed? can use the values directly?
-      }while( compex128( (i64*)(idxAddr), swpvi.hi, swpvi.lo, (i64*)(&dblvi) )==1 );
-    }
-    else                                                              // must be on an odd number, and so will need to use a 64 bit atomic to swap the indices in the middle
-    {
-      au64* idxAddr = (au64*)( ((u32*)s_vis.addr())+(idx*2+1) );      // offsets using u32, so idx needs to be double, then one more to point to the two indices that are on either side of the 128 bit atomic boundary    
-      u64       cur = idxAddr->load();
-      u64      swpd;
-      do{
-        ++retries;
-        swpd = swp32(cur);
-      }while( !idxAddr->compare_exchange_strong(cur, swpd) );           // compare and swap the hi and lo 32 bits
-    }
-
-    return retries;
-  }
   i64            len(const void *const key, u32 klen, u32* out_vlen=nullptr, u32* out_version=nullptr) const
   {
     if(klen<1){return 0;}
@@ -1396,7 +1285,10 @@ public:
       VerIdx vi = load(i);      
       if(vi.idx!=EMPTY && vi.idx!=DELETED){
         Match m = m_csp->compare(vi.idx, vi.version, key, klen, hash);
-        if(m==MATCH_TRUE){ return m_csp->len(vi.idx, vi.version, out_vlen); }        
+        if(m==MATCH_TRUE){
+          if(out_version){ *out_version = vi.version; }
+          return m_csp->len(vi.idx, vi.version, out_vlen);
+        }        
       }
       
       if(i==en){ return 0ull; }
@@ -1452,6 +1344,10 @@ public:
 };
 struct  SharedMem
 {
+  using    u32  =  uint32_t;
+  using    u64  =  uint64_t;
+  using   au32  =  std::atomic<u32>;
+
   static const int alignment = 0;
   
   #ifdef _WIN32
@@ -1495,14 +1391,15 @@ public:
 
     sm.clear();
   }
-  static SharedMem  AllocAnon(const char* name, u64 size, bool raw_path=false)
+  static SharedMem  AllocAnon(const char* name, u64 sizeBytes, bool raw_path=false)
   {
     using namespace std;
 
     SharedMem sm;
     sm.hndlPtr  = nullptr;
     sm.owner    = false;
-    sm.size     = alignment==0? size  :  alignment-(size%alignment);
+    //sm.size     = alignment==0? sizeBytes  :  alignment-(sizeBytes%alignment);
+    sm.size     = sizeBytes;
 
     #ifdef _WIN32      // windows
       sm.fileHndl = nullptr;
@@ -1538,7 +1435,7 @@ public:
           NULL,
           PAGE_READWRITE,
           0,
-          (DWORD)size,
+          (DWORD)sizeBytes,
           sm.path);
         if(sm.fileHndl!=NULL){ sm.owner=true; }
       }
@@ -1554,7 +1451,7 @@ public:
       if(sm.hndlPtr==nullptr){ 
         int      err = (int)GetLastError();
         LPSTR msgBuf = nullptr;
-        size_t  size = FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+        /*size_t msgSz =*/ FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
                                      NULL, err, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPSTR)&msgBuf, 0, NULL);
         win_printf("simdb initialization error: %d - %s", err, msgBuf);
         LocalFree(msgBuf);
@@ -1592,12 +1489,12 @@ public:
           fcntl(sm.fileHndl, F_ALLOCATECONTIG);
         #endif
 
-        ftruncate(sm.fileHndl, size);
+        ftruncate(sm.fileHndl, sizeBytes);
         flock(sm.fileHndl, LOCK_UN);
         // get the error number and handle the error
       }
 
-      sm.hndlPtr = mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_SHARED , sm.fileHndl, 0); // MAP_PREFAULT_READ  | MAP_NOSYNC
+      sm.hndlPtr = mmap(NULL, sizeBytes, PROT_READ|PROT_WRITE, MAP_SHARED , sm.fileHndl, 0); // MAP_PREFAULT_READ  | MAP_NOSYNC
       close(sm.fileHndl);
       sm.fileHndl = 0;
  
@@ -1610,7 +1507,7 @@ public:
   
     u64      addr = (u64)(sm.hndlPtr);
     u64 alignAddr = addr;
-    if(alignment!=0){ alignAddr = addr + ((alignment-addr%alignment)%alignment); }          // why was the second modulo needed?
+    //if(alignment!=0){ alignAddr = addr + ((alignment-addr%alignment)%alignment); }          // why was the second modulo needed?
     sm.ptr        = (void*)(alignAddr);
 
     return move(sm);
@@ -1656,6 +1553,12 @@ class       simdb
 {
 public:
   using      u8  =  uint8_t;
+  using     u32  =  uint32_t;
+  using     i32  =   int32_t;
+  using     u64  =  uint64_t;
+  using     i64  =   int64_t;
+  using    au32  =  std::atomic<u32>;
+  using    au64  =  std::atomic<u64>;
   using     str  =  std::string;
   using  BlkCnt  =  CncrStr::BlkCnt;
   using  VerIdx  =  CncrHsh::VerIdx;
@@ -1923,8 +1826,4 @@ public:
 
 
 #endif
-
-
-
-
 
