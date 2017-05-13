@@ -2,7 +2,7 @@
 # simdb
 A high performance, shared memory, lock free, cross platform, single file, no dependencies, C++11 key-value store
 
-### Construction:
+simdb is part of LAVA (Live Asynchronous Visualized Architecture) which is a series of single file, minimal dependency, C++11 files to create highly concurrent software while the program being written runs live with internal data visualized.
 
 > simdb db("test", 1024, 4096);
 
