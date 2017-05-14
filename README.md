@@ -14,7 +14,7 @@ SimDB is part of LAVA (Live Asynchronous Visualized Architecture) which is a ser
 
 - Lock Free - The user facing functions are thread-safe and lock free with the exception of the constructor (to avoid race conditions between multiple processes creating the memory mapped file at the same time). 
 
-- Cross Platform - Compiles on Visual Studio 2013, ICC 15.0, gcc 5.4 on Linux, gcc on OS X, and clang on OS X.
+- Cross Platform - Compiles with Visual Studio 2013 and ICC 15.0 on Windows, gcc 5.4 on Linux, gcc on OS X, and clang on OS X.
 
 - Single File - simdb.hpp and the C++11 standard library is all you need. No Windows SDK or any other dependencies, not even from the parent project. 
 
