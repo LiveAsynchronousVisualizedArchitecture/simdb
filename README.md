@@ -22,6 +22,8 @@ simdb is part of LAVA (Live Asynchronous Visualized Architecture) which is a ser
 
 This has already been used for both debugging and visualization, but *should be treated as alpha software*.  Though there are no known outstanding bugs, there are almost certainly bugs (and small design issues) waiting to be discovered and so will need to be fixed as they arise. 
 
+#### Getting Started
+
 ```cpp
 simdb db("test", 1024, 4096);
 ```
