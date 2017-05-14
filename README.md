@@ -1,10 +1,10 @@
 
 ![alt text](https://github.com/LiveAsynchronousVisualizedArchitecture/simdb/blob/master/numbered_slots_upshot.jpg "A key value store is kind of like this")
 
-# simdb
+# SimDB
 #### A high performance, shared memory, lock free, cross platform, single file, no dependencies, C++11 key-value store.
 
-simdb is part of LAVA (Live Asynchronous Visualized Architecture) which is a series of single file, minimal dependency, C++11 files to create highly concurrent software while the program being written runs live with internal data visualized.
+SimDB is part of LAVA (Live Asynchronous Visualized Architecture) which is a series of single file, minimal dependency, C++11 files to create highly concurrent software while the program being written runs live with internal data visualized.
 
 - Hash based key-value store created to be a fundamental piece of a larger software architecture. 
 
@@ -42,7 +42,7 @@ This will return a list of the simdb files in the temp directory as a std::vecto
 db.put("lock free", "is the way to be");
 ```
 
-Simdb works with arbitrary byte buffers for both keys and values. This example uses a convenience function to make a common case easier. 
+SimDB works with arbitrary byte buffers for both keys and values. This example uses a convenience function to make a common case easier. 
 
 ```cpp 
 string s = db.get("lock free");
