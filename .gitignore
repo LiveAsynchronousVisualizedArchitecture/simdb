@@ -1,0 +1,96 @@
+# svn
+*.svn
+
+# json node graphs
+*.lava
+
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+
+# Fortran module files
+*.mod
+*.smod
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+
+# Executables
+*.exe
+*.out
+*.app
+
+# visual studio nonsense
+*.sdf
+*.pdb
+*.idb
+*.tlog
+*.log
+*.ilk
+*.user
+#*.filters
+*.opensdf
+*.suo
+*.psess
+*.vsp
+
+# intel compiler nonsense
+*.amplxeproj
+
+# User-specific files
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Build results
+[Dd]ebug/
+[Dd]ebugPublic/
+[Rr]elease/
+[Rr]eleases/
+x64/
+x86/
+bld/
+[Bb]in/
+[Oo]bj/
+[Ll]og/
+
+# Visual C++ cache files
+ipch/
+*.aps
+*.ncb
+*.opendb
+*.opensdf
+*.sdf
+*.cachefile
+*.VC.db
+*.VC.VC.opendb
+
+
+
+bak/
+nuklear/nuklear_test/nuklear_test/
+
+*.swp
+
+*.swp
+
+*.swp
+
+nuklear/.VizDataStructures.hpp.swp
+
+nuklear/simdb_15_test
+
+nuklear/simdb_15_test

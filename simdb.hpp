@@ -1312,7 +1312,7 @@ public:
     u64 len = strlen(sm.path) + strlen(name);
     if(len > sizeof(sm.path)-1){
       *error_code = simdb_error::PATH_TOO_LONG;
-      return;
+      return move(sm);
     }else{ strcat(sm.path, name); }
 
     #ifdef _WIN32      // windows
