@@ -161,6 +161,7 @@
   #include <sys/param.h>
   #include <unistd.h>
   #include <dirent.h>
+  #include <errno.h>
 #endif
 
 #include <cstdint>
@@ -197,9 +198,9 @@ namespace {
   {
     uint64_t hval = 0xCBF29CE484222325;
     uint8_t*   bp = (uint8_t*)buf;	             // start of buffer 
-    uint8_t*   be = bp + len;		           // beyond end of buffer 
-    while(bp < be){                    // FNV-1a hash each octet of the buffer
-      hval ^= (uint64_t)*bp++;              // xor the bottom with the current octet */
+    uint8_t*   be = bp + len;		                 // beyond end of buffer 
+    while(bp < be){                              // FNV-1a hash each octet of the buffer
+      hval ^= (uint64_t)*bp++;                   // xor the bottom with the current octet */
       hval += (hval << 1) + (hval << 4) + (hval << 5) +
               (hval << 7) + (hval << 8) + (hval << 40);
     }
@@ -337,135 +338,20 @@ namespace {
 }
 
 #ifdef _WIN32
-  auto simdb_listDBs() -> std::vector<std::string>
-  {
-    using namespace std;
-
-    static HMODULE _hModule = nullptr; 
-    static NTOPENDIRECTORYOBJECT  NtOpenDirectoryObject  = nullptr;
-    static NTOPENFILE             NtOpenFile             = nullptr;
-    static NTQUERYDIRECTORYOBJECT NtQueryDirectoryObject = nullptr;
-    static RTLINITUNICODESTRING   RtlInitUnicodeString   = nullptr;
-    
-    vector<string> ret;
-
-    if(!NtOpenDirectoryObject){  
-      NtOpenDirectoryObject  = (NTOPENDIRECTORYOBJECT)GetLibraryProcAddress( _T("ntdll.dll"), "NtOpenDirectoryObject");
-    }
-    if(!NtQueryDirectoryObject){ 
-      NtQueryDirectoryObject = (NTQUERYDIRECTORYOBJECT)GetLibraryProcAddress(_T("ntdll.dll"), "NtQueryDirectoryObject");
-    }
-    if(!NtOpenFile){ 
-      NtOpenFile = (NTOPENFILE)GetLibraryProcAddress(_T("ntdll.dll"), "NtOpenFile");
-    }
-
-    HANDLE     hDir = NULL;
-    IO_STATUS_BLOCK  isb = { 0 };
-    DWORD sessionId;
-    BOOL         ok = ProcessIdToSessionId(GetCurrentProcessId(), &sessionId);
-    if(!ok){ return { "Could not get current session" }; }
-
-    wstring     sesspth = L"\\Sessions\\" + to_wstring(sessionId) + L"\\BaseNamedObjects";
-    const WCHAR* mempth = sesspth.data();
-    
-    WCHAR buf[4096];
-    UNICODE_STRING pth = { 0 };
-    pth.Buffer         = (WCHAR*)mempth;
-    pth.Length         = (USHORT)lstrlenW(mempth) * sizeof(WCHAR);
-    pth.MaximumLength  = pth.Length;
-
-    OBJECT_ATTRIBUTES oa = { 0 };
-    oa.Length             = sizeof( OBJECT_ATTRIBUTES );
-    oa.RootDirectory      = NULL;
-    oa.Attributes         = OBJ_CASE_INSENSITIVE;                               
-    oa.ObjectName         = &pth;
-    oa.SecurityDescriptor = NULL;                        
-    oa.SecurityQualityOfService = NULL;
-
-    NTSTATUS status;
-    status = NtOpenDirectoryObject(
-      &hDir, 
-      /*STANDARD_RIGHTS_READ |*/ DIRECTORY_QUERY, 
-      &oa);
-
-    if(hDir==NULL || status!=STATUS_SUCCESS){ return { "Could not open file" }; }
-
-    BOOLEAN rescan = TRUE;
-    ULONG      ctx = 0;
-    ULONG   retLen = 0;
-    do
-    {
-      status = NtQueryDirectoryObject(hDir, buf, sizeof(buf), TRUE, rescan, &ctx, &retLen);
-      rescan = FALSE;
-      auto info = (OBJECT_DIRECTORY_INFORMATION*)buf;
-
-      if( lstrcmpW(info->type.Buffer, L"Section")!=0 ){ continue; }
-      WCHAR wPrefix[] = L"simdb_";
-      size_t  pfxSz   = sizeof(wPrefix);
-      if( strncmp( (char*)info->name.Buffer, (char*)wPrefix, pfxSz)!=0 ){  continue; }
-
-      wstring  wname = wstring( (WCHAR*)info->name.Buffer );
-      wstring_convert<codecvt_utf8<wchar_t>> cnvrtr;
-      string    name = cnvrtr.to_bytes(wname);
-
-      ret.push_back(name);
-    }while(status!=STATUS_NO_MORE_ENTRIES);
-    
-    return ret;
-  }
-#else
-  auto simdb_listDBs() -> std::vector<std::string>
-  {
-    using namespace std;
-
-    char   prefix[] = "simdb_";
-    size_t  pfxSz   = sizeof(prefix)-1;
-
-    vector<string> ret;
-
-    DIR* d;                                          // d is directory handle
-    if((d = opendir(P_tmpdir)) == NULL)
-    //if((d = opendir("/tmp/")) == NULL)
-    { return ret; }
- 
-    struct dirent*   dent;                           // dent is directory entry 
-    struct stat  stat_buf;
-    while( (dent = readdir(d)) != NULL )
-    {
-      //if(stat(dent->d_name, &stat_buf) == -1){continue;}
-        //return ret;
-      //}
-
-      //if( S_ISREG(stat_buf.st_mode) ){ 
-        //printf("name %-25s - %s  %d \n", dent->d_name, prefix, (int)pfxSz);
-        if(strncmp(dent->d_name, prefix, pfxSz)==0){
-          //printf("pushing %-25s - \n", dent->d_name);
-          ret.push_back(dent->d_name);
-        }
-      //} 
-
-      //printf("%-25s - \n", dent->d_name);
-     }
-     closedir(d);
-
-    return ret;
-  }
-  // gcc/clang/linux ?
-      //perror("stat ERROR");
-      //exit(3);
-      //str = "regular"; 
-      //string name = dent->d_name;
-      //
-      //}else if( S_ISDIR(stat_buf.st_mode) ){
-        //str = "directory"; 
-      //}else{ 
-        //str = "other"; 
-      //}
-#endif
-
-#ifdef _WIN32
   #pragma warning(pop)
 #endif
+
+enum class simdb_error { 
+  NO_ERRORS=2, 
+  DIR_NOT_FOUND, 
+  DIR_ENTRY_ERROR, 
+  COULD_NOT_OPEN_MAP_FILE, 
+  COULD_NOT_MEMORY_MAP_FILE,
+  SHARED_MEMORY_ERROR,
+  FTRUNCATE_FAILURE,
+  FLOCK_FAILURE,
+  PATH_TOO_LONG
+};
 
 template<class T> 
 class    lava_vec
@@ -602,8 +488,8 @@ public:
     h.asInt = s_h->load();
     return h.idx;
   }
-  auto       list() -> ListVec const* { return &s_lv; }                               // not thread safe
-  u32      lnkCnt()                                                // not thread safe
+  auto       list() -> ListVec const* { return &s_lv; }                      // not thread safe
+  u32      lnkCnt()                                                          // not thread safe
   {
     u32    cnt = 0;
     u32 curIdx = idx();
@@ -636,20 +522,21 @@ public:
   };
   union   KeyReaders
   {
-    struct{ u32 isKey : 1; i32 readers : 31; };
+    struct{ u32 isKey : 1; u32 isDeleted : 1; i32 readers : 30; };
     u32 asInt;
   };
   struct  BlkLst                                                   // 24 bytes total
   {    
     union{
       KeyReaders kr;
-      struct{ u32 isKey : 1; i32 readers : 31; };
+      struct{ u32 isKey : 1; u32 isDeleted : 1; i32 readers : 30; };
     };                                                             //  4 bytes  -  kr is key readers  
     u32 idx, version, len, klen, hash;                             // 20 bytes
 
-    BlkLst() : isKey(0), readers(0), idx(0), version(0), len(0), klen(0), hash(0) {}
+    BlkLst() : isKey(0), isDeleted(0), readers(0), idx(0), version(0), len(0), klen(0), hash(0) {}
     BlkLst(bool _isKey, i32 _readers, u32 _idx, u32 _version, u32 _len=0, u32 _klen=0, u32 _hash=0) : 
       isKey(_isKey),
+      isDeleted(0),
       readers(_readers),
       idx(_idx),
       version(_version),
@@ -686,28 +573,37 @@ public:
     au32* areaders  =  (au32*)&(bl->kr);
     cur.asInt       =  areaders->load();
     do{
-      if(bl->version!=version || cur.readers<0){ return BlkLst(); }
+      if(bl->version!=version || cur.readers<0 || cur.isDeleted){ return BlkLst(); }
       nxt = cur;
       nxt.readers += 1;
     }while( !areaders->compare_exchange_strong(cur.asInt, nxt.asInt) );
     
     return *bl;  // after readers has been incremented this block list entry is not going away. The only thing that would change would be the readers and that doesn't matter to the calling function.
   }
-  bool      decReaders(u32 blkIdx, u32 version) const                   // BI is Block Index  increment the readers by one and return the previous kv from the successful swap 
+  bool      decReadersOrDel(u32 blkIdx, u32 version, bool del=false) const                   // BI is Block Index  increment the readers by one and return the previous kv from the successful swap 
   {
-    KeyReaders cur, nxt;
+    KeyReaders cur, nxt; bool doDelete;
+
     BlkLst*     bl  =  &s_bls[blkIdx];
     au32* areaders  =  (au32*)&(bl->kr);
     cur.asInt       =  areaders->load();
     do{
+      doDelete = false;
       if(bl->version!=version){ return false; }
       nxt          = cur;
-      nxt.readers -= 1;
+      if(del){
+        if(cur.readers==0 && !cur.isDeleted){ doDelete=true; }
+        nxt.isDeleted = true;
+      }else{
+        if(cur.readers==1 &&  cur.isDeleted){ doDelete=true; }
+        nxt.readers  -= 1;    
+      }
     }while( !areaders->compare_exchange_strong(cur.asInt, nxt.asInt) );
     
-    if(cur.readers==0){ doFree(blkIdx); return false; }
+    if(doDelete){ doFree(blkIdx); return false; }
 
     return true;
+    //return cur.isDeleted;
   }
 
 private:
@@ -760,7 +656,7 @@ private:
   {
     u32  blkFree  =  blockFreeSize();
     u8*        p  =  blockFreePtr(blkIdx);
-    u32   cpyLen  =  len==0? blkFree : len;                                              // if next is negative, then it will be the length of the bytes in that block
+    u32   cpyLen  =  len==0? blkFree : len;                                                // if next is negative, then it will be the length of the bytes in that block
     p      += ofst;
     memcpy(p, bytes, cpyLen);
 
@@ -773,14 +669,14 @@ private:
       u8*         p  =  blockFreePtr(blkIdx);
       u32    cpyLen  =  len==0?  blkFree-ofst  :  len;
       memcpy(bytes, p+ofst, cpyLen);
-    decReaders(blkIdx, version);
+    decReadersOrDel(blkIdx, version);
 
     return cpyLen;
   }
 
 public:
   static u64    BlockListsOfst(){ return sizeof(u64); }
-  static u64         CListOfst(u32 blockCount){ return BlockListsOfst() + BlockLists::sizeBytes(blockCount); }      // BlockLists::sizeBytes ends up being sizeof(BlkLst)*blockCount + 2 u64 variables
+  static u64         CListOfst(u32 blockCount){ return BlockListsOfst() + BlockLists::sizeBytes(blockCount); }                 // BlockLists::sizeBytes ends up being sizeof(BlkLst)*blockCount + 2 u64 variables
   static u64          BlksOfst(u32 blockCount){ return CListOfst(blockCount) + CncrLst::sizeBytes(blockCount); }
   static u64         sizeBytes(u32 blockSize, u32 blockCount){ return BlksOfst(blockCount) + blockSize*blockCount; }
 
@@ -849,7 +745,7 @@ public:
   }
   bool         free(u32  blkIdx, u32 version)                                                             // doesn't always free a list/chain of blocks - it decrements the readers and when the readers gets below the value that it started at, only then it is deleted (by the first thread to take it below the starting number)
   {
-    return decReaders(blkIdx, version);
+    return decReadersOrDel(blkIdx, version, true);
   }
   void          put(u32  blkIdx, void const *const kbytes, u32 klen, void const *const vbytes, u32 vlen)  // don't need version because this will only be used after allocating and therefore will only be seen by one thread until it is inserted into the ConcurrentHash
   {
@@ -885,13 +781,13 @@ public:
       b   +=  writeBlock(cur, b, remvlen);
     }
   }
-  u32           get(u32  blkIdx, u32 version, void *const bytes, u32 maxlen) const
+  u32           get(u32  blkIdx, u32 version, void *const bytes, u32 maxlen, u32* out_readlen=nullptr) const
   {
     using namespace std;
 
     if(blkIdx == LIST_END){ return 0; }
 
-    BlkLst bl = incReaders(blkIdx, version);   
+    BlkLst bl = incReaders(blkIdx, version);
     
     u32 vlen = bl.len-bl.klen;
     if(bl.len==0 || vlen>maxlen ) return 0;
@@ -926,10 +822,12 @@ public:
       nxt    =  nxtBlock(cur);
     }
 
-  read_failure:
-    decReaders(blkIdx, version);
+    if(out_readlen){ *out_readlen = len; }
 
-    return len;                                                        // only one return after the top to make sure readers can be decremented - maybe it should be wrapped in a struct with a destructor
+  read_failure:
+    decReadersOrDel(blkIdx, version);
+
+    return len;                                                                    // only one return after the top to make sure readers can be decremented - maybe it should be wrapped in a struct with a destructor
   }
   u32        getKey(u32  blkIdx, u32 version, void *const bytes, u32 maxlen) const
   {
@@ -962,15 +860,15 @@ public:
     len   +=  rdLen;
 
   read_failure:
-    decReaders(blkIdx, version);
+    decReadersOrDel(blkIdx, version);
 
     return len;                                           // only one return after the top to make sure readers can be decremented - maybe it should be wrapped in a struct with a destructor    
   }
   Match   memcmpBlk(u32  blkIdx, u32 version, void const *const buf1, void const *const buf2, u32 len) const    // todo: eventually take out the inc and dec readers and only do them when actually reading and dealing with the whole chain of blocks 
-  {
+  { // todo: take out inc and dec here, since the whole block list should be read and protected by start of the list
     if(incReaders(blkIdx, version).len==0){ return MATCH_REMOVED; }
       auto ret = memcmp(buf1, buf2, len);
-    bool freed = !decReaders(blkIdx, version);
+    bool freed = !decReadersOrDel(blkIdx, version);
 
     if(freed){       return MATCH_REMOVED; }
     else if(ret==0){ return MATCH_TRUE;    }
@@ -986,10 +884,10 @@ public:
     if(blklstHsh!=hash){ return MATCH_FALSE; }                         // vast majority of calls should end here
 
     u32   curidx  =  blkIdx;
-    VerIdx   nxt  =  nxtBlock(curidx);                              if(nxt.version!=version) return MATCH_FALSE;
+    VerIdx   nxt  =  nxtBlock(curidx);                              if(nxt.version!=version){ return MATCH_FALSE; }
     u32    blksz  =  (u32)blockFreeSize();
     u8*   curbuf  =  (u8*)buf;
-    auto    klen  =  s_bls[blkIdx].klen;                            if(klen!=len) return MATCH_FALSE;
+    auto    klen  =  s_bls[blkIdx].klen;                            if(klen!=len){ return MATCH_FALSE; }
     auto  curlen  =  len;
     while(true)
     {
@@ -1003,7 +901,7 @@ public:
       curbuf  +=  blksz;
       curlen  -=  blksz;
       curidx   =  nxt.idx;
-      nxt      =  nxtBlock(curidx);                                 if(nxt.version!=version) return MATCH_FALSE;
+      nxt      =  nxtBlock(curidx);                                 if(nxt.version!=version){ return MATCH_FALSE; }
     }
   }
   u32           len(u32  blkIdx, u32 version, u32* out_vlen=nullptr) const
@@ -1032,12 +930,13 @@ public:
   using  VerIdx  =  CncrStr::VerIdx;
   using  BlkLst  =  CncrStr::BlkLst;
 
-  struct VerIpd { u32 version, ipd; };                       // ipd is Ideal Position Distance
+  struct VerIpd { u32 version, ipd; };                         // ipd is Ideal Position Distance
 
   static const u32  KEY_MAX          =   0xFFFFFFFF; 
-  static const u32  EMPTY            =   KEY_MAX;            // first 21 bits set 
-  static const u32  DELETED          =   KEY_MAX - 1;        // 0xFFFFFFFE;       // 1 less than the EMPTY
+  static const u32  EMPTY            =   KEY_MAX;              // first 21 bits set 
+  static const u32  DELETED          =   KEY_MAX - 1;          // 0xFFFFFFFE;       // 1 less than the EMPTY
   static const u32  LIST_END         =   CncrStr::LIST_END;
+  static const u32  SLOT_END         =   CncrStr::LIST_END;
 
   static u64           sizeBytes(u32 size)                   // the size in bytes that this structure will take up in the shared memory
   {
@@ -1104,8 +1003,8 @@ private:
   {
     using namespace std;
 
-    u64     exp = i%2? swp32(expected.asInt) : expected.asInt;
-    u64    desi = i%2? swp32(desired.asInt) : desired.asInt;                        // desi is desired int
+    u64     exp = i%2? swp32(expected.asInt) : expected.asInt;                                // if the index (i) is odd, swap the upper and lower 32 bits around
+    u64    desi = i%2? swp32(desired.asInt) : desired.asInt;                                  // desi is desired int
     au64*  addr = (au64*)(s_vis.data()+i);
     bool     ok = addr->compare_exchange_strong( exp, desi );
     
@@ -1115,10 +1014,10 @@ private:
   {
     store_vi(i, empty_vi().asInt);
   }
-  VerIpd            ipd(u32 i, u32 blkIdx)     const                                // ipd is Ideal Position Distance - it is the distance a CncrHsh index value is from the position that it gets hashed to 
+  VerIpd            ipd(u32 i, u32 blkIdx)     const                                          // ipd is Ideal Position Distance - it is the distance a CncrHsh index value is from the position that it gets hashed to 
   {
     BlkLst bl = m_csp->blkLst(blkIdx);
-    u32    ip = bl.hash % m_sz;                                                     // ip is Ideal Position
+    u32    ip = bl.hash % m_sz;                                                               // ip is Ideal Position
     u32   ipd = i>ip?  i-ip  :  m_sz - ip + i;
     return {bl.version, ipd};
   }
@@ -1136,10 +1035,11 @@ private:
   template<class FUNC> 
   bool       runIfMatch(VerIdx vi, const void* const buf, u32 len, u32 hash, FUNC f) const 
   { // todo: should this increment and decrement the readers, as well as doing something different if it was the thread that freed the blocks
-    //VerIdx kv = incReaders(i);    
+    //VerIdx kv = incReaders(vi.idx, vi.version);
       Match      m = m_csp->compare(vi.idx, vi.version, buf, len, hash);
       bool matched = false;                                                   // not inside a scope
-      if(m==MATCH_TRUE){ matched=true; f(vi); }          
+      if(m==MATCH_TRUE){ matched=true; f(vi); }
+    //decReaders(vi.idx, vi.version);    
     //decReaders(i);
     
     return matched;
@@ -1181,8 +1081,12 @@ public:
       VerIdx vi = load(i);
       if(vi.idx>=DELETED){                                                                  // it is either deleted or empty
         bool success = cmpex_vi(i, vi, desired);
-        if(success){return vi;}
-        else{ i=prevIdx(i); continue; }                                                     // retry the same loop again if a good slot was found but it was changed by another thread between the load and the compare-exchange
+        if(success){
+          return vi;
+        }else{ 
+          i=prevIdx(i); 
+          continue; 
+        }                                                                                   // retry the same loop again if a good slot was found but it was changed by another thread between the load and the compare-exchange
       }                                                                                     // Either we just added the key, or another thread did.
 
       if(m_csp->compare(vi.idx,vi.version,key,klen,hash) != MATCH_TRUE){
@@ -1191,8 +1095,12 @@ public:
       }
 
       bool success = cmpex_vi(i, vi, desired);
-      if(success){ return vi; }
-      else{ i=prevIdx(i); continue; }
+      if(success){ 
+        return vi;
+      }else{ 
+        i=prevIdx(i); 
+        continue; 
+      }
     }
 
     // return empty;  // should never be reached
@@ -1225,9 +1133,7 @@ public:
     for(;; i=nxtIdx(i) )
     {
       VerIdx vi = load(i);
-
-      if(vi.idx==EMPTY){   return empty;   }
-      if(vi.idx==DELETED){ return deleted; }
+      if(vi.idx>=DELETED){continue;}
 
       Match m = m_csp->compare(vi.idx, vi.version, key, klen, hash);
       if(m==MATCH_TRUE){
@@ -1235,7 +1141,9 @@ public:
         if(success){
           //cleanDeletion(i);
           return vi;
-        }else{ i=prevIdx(i); continue; }
+        }else{ 
+          i=prevIdx(i); continue; 
+        }
 
         //return vi;  // unreachable
       }
@@ -1260,14 +1168,14 @@ public:
   VerIdx          at(u32   idx)                const { return load(idx); }
   u32            nxt(u32 stIdx)                const
   {
-    auto idx = stIdx;
+    auto     idx = stIdx;
     VerIdx empty = empty_vi();
     do{
       VerIdx vi = load(idx);
-      if(vi.idx != empty.idx) break;
+      if(vi.idx < DELETED){break;}
       idx = (idx+1) % m_sz;                                             // don't increment idx above since break comes before it here
 
-      if(idx==stIdx) return empty.idx;
+      if(idx==stIdx) return SLOT_END;
     }while(true);
 
     return  idx;
@@ -1294,14 +1202,14 @@ public:
       if(i==en){ return 0ull; }
     }
   }
-  bool           get(const void *const key, u32 klen, void *const out_val, u32 vlen) const
+  bool           get(const void *const key, u32 klen, void *const out_val, u32 vlen, u32* out_readlen=nullptr) const
   {
     if(klen<1){ return 0; }
 
     u32 hash=HashBytes(key,klen); 
     CncrStr*  csp = m_csp;
-    auto  runFunc = [csp, out_val, vlen](VerIdx vi){
-      return csp->get(vi.idx, vi.version, out_val, vlen);
+    auto  runFunc = [csp, out_val, vlen, out_readlen](VerIdx vi){
+      return csp->get(vi.idx, vi.version, out_val, vlen, out_readlen);
     };
 
     return runMatch(key, klen, hash, runFunc);
@@ -1311,14 +1219,14 @@ public:
     assert(klen>0);
 
     u32     hash = CncrHsh::HashBytes(key, klen);
-    VerIdx lstVi = m_csp->alloc(klen+vlen, klen, hash);                                 // lstVi is block list versioned index
+    VerIdx lstVi = m_csp->alloc(klen+vlen, klen, hash);                            // lstVi is block list versioned index
     if(out_startBlock){ *out_startBlock = lstVi.idx; }
     if(lstVi.idx==LIST_END){ return false; }
 
     m_csp->put(lstVi.idx, key, klen, val, vlen);
 
     VerIdx vi = putHashed(hash, lstVi, key, klen);
-    if(vi.idx<DELETED){ m_csp->free(vi.idx, vi.version); }                              // putHashed returns the entry that was there before, which is the entry that was replaced. If it wasn't empty, we free it here. 
+    if(vi.idx<DELETED){ m_csp->free(vi.idx, vi.version); }                         // putHashed returns the entry that was there before, which is the entry that was replaced. If it wasn't empty, we free it here. 
 
     return true;
   }
@@ -1335,8 +1243,8 @@ public:
   {    
     assert(i < m_sz);
 
-    au64* avi = (au64*)(s_vis.data()+i);                            // avi is atomic versioned index
-    u64   cur = swp32(avi->load());                                 // need because of endianess? // atomic_load<u64>( (au64*)(m_vis.data()+i) );              // Load the key that was there.
+    au64* avi = (au64*)(s_vis.data()+i);                                           // avi is atomic versioned index
+    u64   cur = swp32(avi->load());                                                // need because of endianess? // atomic_load<u64>( (au64*)(m_vis.data()+i) );              // Load the key that was there.
 
     if(i%2==1) return VerIdx(hi32(cur), lo32(cur));
     else       return VerIdx(lo32(cur), hi32(cur));
@@ -1362,15 +1270,6 @@ struct  SharedMem
   bool            owner;
   char             path[256];
 
-  static  bool file_exists(char const* filename)
-  {
-    if(FILE* file = fopen(filename, "r")){
-      fclose(file);
-      return true;
-    }
-    return false;
-  }
-
 public:
   static void        FreeAnon(SharedMem& sm)
   {
@@ -1391,7 +1290,7 @@ public:
 
     sm.clear();
   }
-  static SharedMem  AllocAnon(const char* name, u64 sizeBytes, bool raw_path=false)
+  static SharedMem  AllocAnon(const char* name, u64 sizeBytes, bool raw_path=false, simdb_error* error_code=nullptr)
   {
     using namespace std;
 
@@ -1400,6 +1299,7 @@ public:
     sm.owner    = false;
     //sm.size     = alignment==0? sizeBytes  :  alignment-(sizeBytes%alignment);
     sm.size     = sizeBytes;
+    if(error_code){ *error_code = simdb_error::NO_ERRORS; }
 
     #ifdef _WIN32      // windows
       sm.fileHndl = nullptr;
@@ -1410,15 +1310,17 @@ public:
     #endif
 
     u64 len = strlen(sm.path) + strlen(name);
-    if(len > sizeof(sm.path)-1){ /* todo: handle errors here */ }
-    else{ strcat(sm.path, name); }
+    if(len > sizeof(sm.path)-1){
+      *error_code = simdb_error::PATH_TOO_LONG;
+      return;
+    }else{ strcat(sm.path, name); }
 
     #ifdef _WIN32      // windows
       if(raw_path)
       {
         sm.fileHndl = CreateFile(
           sm.path, 
-          FILE_MAP_READ|FILE_MAP_WRITE, 
+          GENERIC_READ|GENERIC_WRITE,   //FILE_MAP_READ|FILE_MAP_WRITE,  // apparently FILE_MAP constants have no effects here
           FILE_SHARE_READ|FILE_SHARE_WRITE, 
           NULL,
           CREATE_NEW,
@@ -1430,7 +1332,7 @@ public:
 
       if(sm.fileHndl==NULL)
       {
-        sm.fileHndl = CreateFileMapping(
+        sm.fileHndl = CreateFileMapping(  // todo: simplify and call this right away, it will open the section if it already exists
           INVALID_HANDLE_VALUE,
           NULL,
           PAGE_READWRITE,
@@ -1461,27 +1363,22 @@ public:
         return move(sm); 
       }
     #elif defined(__APPLE__) || defined(__MACH__) || defined(__unix__) || defined(__FreeBSD__) || defined(__linux__)  // osx, linux and freebsd
-      sm.owner   = true; // todo: have to figure out how to detect which process is the owner
+      sm.owner  = true; // todo: have to figure out how to detect which process is the owner
 
-      FILE* fp = fopen(sm.path,"rw");
-      if(fp){
-        fclose(fp);
-        sm.fileHndl = open(sm.path, O_RDWR);
-        sm.owner = false;
-      }else{
+      sm.fileHndl = open(sm.path, O_RDWR);
+      if(sm.fileHndl == -1)
+      {
         sm.fileHndl = open(sm.path, O_CREAT|O_RDWR, S_IRUSR|S_IWUSR |S_IRGRP|S_IWGRP | S_IROTH|S_IWOTH ); // O_CREAT | O_SHLOCK ); // | O_NONBLOCK );
         if(sm.fileHndl == -1){
-          printf("open failed, file handle was -1 \nFile name: %s \nError number: %d \n\n", sm.path, errno); 
-          fflush(stdout);
+          if(error_code){ *error_code = simdb_error::COULD_NOT_OPEN_MAP_FILE; }
         }
         else{
           //flock(sm.fileHndl, LOCK_EX);   // exclusive lock  // LOCK_NB
         }
-      }
+      }else{ sm.owner = false; }
 
-      if(sm.owner){  // todo: still need more concrete race protection
+      if(sm.owner){  // todo: still need more concrete race protection?
         fcntl(sm.fileHndl, F_GETLK, &flock);
-
         flock(sm.fileHndl, LOCK_EX);              // exclusive lock  // LOCK_NB
         //fcntl(sm.fileHndl, F_PREALLOCATE);
         #if defined(__linux__) 
@@ -1489,19 +1386,20 @@ public:
           fcntl(sm.fileHndl, F_ALLOCATECONTIG);
         #endif
 
-        ftruncate(sm.fileHndl, sizeBytes);
-        flock(sm.fileHndl, LOCK_UN);
-        // get the error number and handle the error
+        if( ftruncate(sm.fileHndl, sizeBytes)!=0 ){
+          if(error_code){ *error_code = simdb_error::FTRUNCATE_FAILURE; }
+        }
+        if( flock(sm.fileHndl, LOCK_UN)!=0 ){
+          if(error_code){ *error_code = simdb_error::FLOCK_FAILURE; }
+        }
       }
 
-      sm.hndlPtr = mmap(NULL, sizeBytes, PROT_READ|PROT_WRITE, MAP_SHARED , sm.fileHndl, 0); // MAP_PREFAULT_READ  | MAP_NOSYNC
+      sm.hndlPtr  = mmap(NULL, sizeBytes, PROT_READ|PROT_WRITE, MAP_SHARED , sm.fileHndl, 0); // MAP_PREFAULT_READ  | MAP_NOSYNC
       close(sm.fileHndl);
       sm.fileHndl = 0;
  
       if(sm.hndlPtr==MAP_FAILED){
-        printf("mmap failed\nError number: %d \n\n", errno);
-        fflush(stdout);
-        /*todo: handle this error*/ 
+        if(error_code){ *error_code = simdb_error::COULD_NOT_MEMORY_MAP_FILE; }
       }
     #endif       
   
@@ -1573,18 +1471,21 @@ private:
   CncrHsh    s_ch;               // store the indices of keys and values - contains a ConcurrentList
 
   // these variables are local to the stack where simdb lives, unlike the others, they are not simply a pointer into the shared memory
-  SharedMem           m_mem;
-  mutable u32    m_nxtChIdx;
-  mutable u32    m_curChIdx;
-  u64              m_blkCnt;
-  u64               m_blkSz;
-  bool             m_isOpen;
+  SharedMem             m_mem;
+  mutable simdb_error m_error;
+  mutable u32      m_nxtChIdx;
+  mutable u32      m_curChIdx;
+  u64                m_blkCnt;
+  u64                 m_blkSz;
+  bool               m_isOpen;
 
 public:
   static const u32        EMPTY = CncrHsh::EMPTY;              // 28 bits set 
   static const u32      DELETED = CncrHsh::DELETED;            // 28 bits set 
   static const u32   FAILED_PUT = CncrHsh::EMPTY;              // 28 bits set 
+  static const u32     SLOT_END = CncrHsh::SLOT_END;
   static const u32     LIST_END = CncrStr::LIST_END;
+
   static u64        OffsetBytes(){ return sizeof(au64)*3; }
   static u64            MemSize(u64 blockSize, u64 blockCount)
   {
@@ -1606,9 +1507,11 @@ public:
     m_curChIdx(0),
     m_isOpen(false)
   {
-    new (&m_mem) SharedMem( SharedMem::AllocAnon(name, MemSize(blockSize,blockCount), raw_path) );
+    simdb_error error_code = simdb_error::NO_ERRORS;
+    new (&m_mem) SharedMem( SharedMem::AllocAnon(name, MemSize(blockSize,blockCount), raw_path, &error_code) );
 
-    if(!m_mem.hndlPtr){ return; /*error*/ }
+    if(error_code!=simdb_error::NO_ERRORS){ m_error = error_code; return; }
+    if(!m_mem.hndlPtr){ m_error = simdb_error::SHARED_MEMORY_ERROR; return; }
 
     s_blockCount  =  ((au64*)m_mem.data())+2;
     s_blockSize   =  ((au64*)m_mem.data())+1;
@@ -1650,9 +1553,9 @@ public:
   {
     return s_ch.len(key, klen, out_vlen, out_version);
   }
-  bool         get(const void *const key, u32 klen, void *const   out_val, u32 vlen) const
+  bool         get(const void *const key, u32 klen, void *const   out_val, u32 vlen, u32* out_readlen=nullptr) const
   {
-    return s_ch.get(key, klen, out_val, vlen);
+    return s_ch.get(key, klen, out_val, vlen, out_readlen);
   }
   bool         put(const void *const key, u32 klen, const void *const val, u32 vlen, u32* out_startBlock=nullptr)
   {
@@ -1688,18 +1591,15 @@ public:
     #endif
   }
   VerIdx       nxt() const                                                                  // this version index represents a hash index, not an block storage index
-  {
-    VerIdx  empty = s_ch.empty_vi();
-    u32     chNxt;
-    VerIdx     vi;
-    do{
-           chNxt = s_ch.nxt(m_nxtChIdx);      if(chNxt==empty.idx){return empty;}           // can return the same index - it does not do the iteration after finding a non empty key
-              vi = s_ch.at(chNxt);
+  {    
+    VerIdx ret = s_ch.empty_vi();
+    u32  chNxt = s_ch.nxt(m_nxtChIdx);
+    if(chNxt!=SLOT_END){
       m_nxtChIdx = (chNxt + 1) % m_blkCnt;
-    }while( IsEmpty(vi) );
-
-    m_curChIdx = chNxt;
-    VerIdx ret = {chNxt, vi.version};
+      ret        = s_ch.at(chNxt);
+    }else{
+      m_nxtChIdx = (m_nxtChIdx + 1) % m_blkCnt;      
+    }
     
     return ret;
   }
@@ -1709,7 +1609,7 @@ public:
 
     VerIdx vi = s_ch.load(idx);  
     if(vi.idx >= CncrHsh::DELETED || vi.version!=version){return false;}
-    u32 l = s_cs.getKey(vi.idx, vi.version, out_buf, klen);                         // l is length
+    u32 l = s_cs.getKey(vi.idx, vi.version, out_buf, klen);                               // l is length
     if(l<1){return false;}
 
     return true;
@@ -1735,12 +1635,16 @@ public:
     }
     return false;
   }
+  auto       error() const -> simdb_error
+  {
+    return m_error;
+  }
 
   // separated C++ functions - these won't need to exist if compiled for a C interface
   struct VerStr { 
     u32 ver; string str; 
-    bool  operator<(VerStr const& vs) const { if(str==vs.str) return ver<vs.ver; else return str<vs.str; }  
-    bool  operator<(string const& rs) const { return str<rs;    }
+    bool  operator<(VerStr const& vs) const { return str<vs.str; }
+    bool  operator<(string const& rs) const { return str<rs;     }
     bool operator==(VerStr const& vs) const { return str==vs.str && ver==vs.ver; } 
   };   
 
@@ -1770,28 +1674,27 @@ public:
   VerStr    nxtKey(u64* searched=nullptr)               const
   {
     u32 klen, vlen;
-    bool    ok = false;
-    i64   prev = (i64)m_nxtChIdx;
-    VerIdx nxt = this->nxt();
+    bool      ok = false;
+    i64     prev = (i64)m_nxtChIdx;
+    VerIdx viNxt = this->nxt();
+    i64      cur = (i64)m_nxtChIdx;
 
     if(searched){
-      i64 sidx  = (i64)nxt.idx;       // sidx is signed index
-      i64 sprev = (i64)prev;          // sprev is signed previous
-      *searched = (sidx-sprev)>=0?  sidx-sprev  :  (m_blkCnt-sprev-1) + sidx+1;
+      *searched = (cur-prev)>=0?  cur-prev-1  :  (m_blkCnt-prev)+cur;   //(m_blkCnt-prev-1) + cur+1;
     }
-    if(nxt.idx==EMPTY){ return {nxt.version, ""}; }
+    if(viNxt.idx>=DELETED){ return {viNxt.version, ""}; }
     
-    i64 total_len = this->len(nxt.idx, nxt.version, &klen, &vlen);
-    if(total_len==0){ return {nxt.version, ""}; }
+    i64 total_len = this->len(cur-1, viNxt.version, &klen, &vlen);
+    if(total_len==0){ return {viNxt.version, ""}; }
     
     str key(klen,'\0');
-    ok         = this->getKey(nxt.idx, nxt.version, 
+    ok         = this->getKey(cur-1, viNxt.version, 
                               (void*)key.data(), klen); 
                               
     if(!ok || strlen(key.c_str())!=key.length() )
-      return {nxt.version, ""};
+      return {viNxt.version, ""};
 
-    return { nxt.version, key };                    // copy elision 
+    return { viNxt.version, key };                    // copy elision 
   }
   auto  getKeyStrs() const -> std::vector<VerStr>
   {
@@ -1801,8 +1704,7 @@ public:
     while(srchCnt < m_blkCnt)
     {
       nxt = nxtKey(&searched);
-      if( keys.find(nxt) != keys.end() ){break;}
-      else if(nxt.str.length() > 0){ keys.insert(nxt); }
+      if(nxt.str.length() > 0){ keys.insert(nxt); }
       
       srchCnt += searched;
     }
@@ -1815,6 +1717,14 @@ public:
   }
 
   template<class T>
+  auto         get(str const& key) -> std::vector<T>
+  {
+    u32 vlen = 0;
+    len(key.data(), (u32)key.length(), &vlen);
+    std::vector<T> ret(vlen);    
+    return get(key.data(), (u32)key.length(), (void*)ret.data(), vlen);
+  }
+  template<class T>
   i64          put(str    const& key, std::vector<T> const& val)
   {    
     return put(key.data(), (u32)key.length(), val.data(), (u32)(val.size()*sizeof(T)) );
@@ -1823,7 +1733,125 @@ public:
 
 };
 
+// simdb_listDBs()
+#ifdef _WIN32
+  auto simdb_listDBs(simdb_error* error_code=nullptr) -> std::vector<std::string>
+  {
+    using namespace std;
+
+    static HMODULE                _hModule               = nullptr; 
+    static NTOPENDIRECTORYOBJECT  NtOpenDirectoryObject  = nullptr;
+    static NTOPENFILE             NtOpenFile             = nullptr;
+    static NTQUERYDIRECTORYOBJECT NtQueryDirectoryObject = nullptr;
+    static RTLINITUNICODESTRING   RtlInitUnicodeString   = nullptr;
+    
+    vector<string> ret;
+
+    if(!NtOpenDirectoryObject){  
+      NtOpenDirectoryObject  = (NTOPENDIRECTORYOBJECT)GetLibraryProcAddress( _T("ntdll.dll"), "NtOpenDirectoryObject");
+    }
+    if(!NtQueryDirectoryObject){ 
+      NtQueryDirectoryObject = (NTQUERYDIRECTORYOBJECT)GetLibraryProcAddress(_T("ntdll.dll"), "NtQueryDirectoryObject");
+    }
+    if(!NtOpenFile){ 
+      NtOpenFile = (NTOPENFILE)GetLibraryProcAddress(_T("ntdll.dll"), "NtOpenFile");
+    }
+
+    HANDLE     hDir = NULL;
+    IO_STATUS_BLOCK  isb = { 0 };
+    DWORD sessionId;
+    BOOL         ok = ProcessIdToSessionId(GetCurrentProcessId(), &sessionId);
+    if(!ok){ return { "Could not get current session" }; }
+
+    wstring     sesspth = L"\\Sessions\\" + to_wstring(sessionId) + L"\\BaseNamedObjects";
+    const WCHAR* mempth = sesspth.data();
+    
+    WCHAR buf[4096];
+    UNICODE_STRING pth = { 0 };
+    pth.Buffer         = (WCHAR*)mempth;
+    pth.Length         = (USHORT)lstrlenW(mempth) * sizeof(WCHAR);
+    pth.MaximumLength  = pth.Length;
+
+    OBJECT_ATTRIBUTES oa = { 0 };
+    oa.Length             = sizeof( OBJECT_ATTRIBUTES );
+    oa.RootDirectory      = NULL;
+    oa.Attributes         = OBJ_CASE_INSENSITIVE;                               
+    oa.ObjectName         = &pth;
+    oa.SecurityDescriptor = NULL;                        
+    oa.SecurityQualityOfService = NULL;
+
+    NTSTATUS status;
+    status = NtOpenDirectoryObject(
+      &hDir, 
+      /*STANDARD_RIGHTS_READ |*/ DIRECTORY_QUERY, 
+      &oa);
+
+    if(hDir==NULL || status!=STATUS_SUCCESS){ return { "Could not open file" }; }
+
+    BOOLEAN rescan = TRUE;
+    ULONG      ctx = 0;
+    ULONG   retLen = 0;
+    do
+    {
+      status = NtQueryDirectoryObject(hDir, buf, sizeof(buf), TRUE, rescan, &ctx, &retLen);
+      rescan = FALSE;
+      auto info = (OBJECT_DIRECTORY_INFORMATION*)buf;
+
+      if( lstrcmpW(info->type.Buffer, L"Section")!=0 ){ continue; }
+      WCHAR wPrefix[] = L"simdb_";
+      size_t  pfxSz   = sizeof(wPrefix);
+      if( strncmp( (char*)info->name.Buffer, (char*)wPrefix, pfxSz)!=0 ){  continue; }
+
+      wstring  wname = wstring( (WCHAR*)info->name.Buffer );
+      wstring_convert<codecvt_utf8<wchar_t>> cnvrtr;
+      string    name = cnvrtr.to_bytes(wname);
+
+      ret.push_back(name);
+    }while(status!=STATUS_NO_MORE_ENTRIES);
+    
+    return ret;
+  }
+#else
+  auto simdb_listDBs(simdb_error* error_code=nullptr) -> std::vector<std::string>
+  {
+    using namespace std;
+
+    char   prefix[] = "simdb_";
+    size_t  pfxSz   = sizeof(prefix)-1;
+
+    vector<string> ret;
+
+    DIR* d;                                          // d is directory handle
+    errno = ENOENT;
+    if( (d=opendir(P_tmpdir))==NULL || errno!=ENOENT){
+      closedir(d);
+      if(error_code){ *error_code = simdb_error::DIR_NOT_FOUND; }
+      return ret;
+    }
+ 
+    struct dirent*     dent;                         // dent is directory entry 
+    while( (dent=readdir(d)) != NULL )
+    {
+      if(errno != ENOENT){
+        closedir(d);
+        if(error_code){ *error_code = simdb_error::DIR_ENTRY_ERROR; }        
+        return ret;
+      }
+
+      if(strncmp(dent->d_name, prefix, pfxSz)==0){
+        ret.push_back(dent->d_name);
+      }
+    }
+
+    closedir(d);
+    if(error_code){ *error_code = simdb_error::NO_ERRORS; }
+    return ret;
+  }
+#endif
 
 
 #endif
+
+
+
 
