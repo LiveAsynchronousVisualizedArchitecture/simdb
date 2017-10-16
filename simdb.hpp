@@ -709,6 +709,7 @@ public:
       }
     }
 
+
     u32  ver = (u32)s_version->fetch_add(1);
     u32  cur = st;
     u32  nxt = 0;
@@ -718,7 +719,7 @@ public:
       for(u32 i=0; i<blocks-1; ++i)
       {
         nxt = s_cl.nxt();
-        if(nxt==LIST_END){ free(st, ver); VerIdx empty={LIST_END,0}; return empty; }
+        if(nxt==LIST_END){ free(st, ver); VerIdx empty={LIST_END,0}; return empty; } // todo: will this free the start  if the start was never set? - will it just reset the blocks but free the index?
 
         s_bls[cur] = BlkLst(false, 0, nxt, ver, size);
         cur        = nxt;
@@ -730,10 +731,13 @@ public:
     {      
       s_bls[cur] = BlkLst(false,0,LIST_END,ver,size,0,0);       // if there is only one block needed, cur and st could be the same
 
+      auto b = s_bls[st]; // debugging
+
       s_bls[st].isKey = true;
       s_bls[st].hash  = hash;
       s_bls[st].len   = size;
-      s_bls[st].klen  = klen;
+      s_bls[st].klen  = klen; // set deleted to false?
+      s_bls[st].isDeleted = false;
 
       if(out_blocks){
         out_blocks->end = nxt==LIST_END;
@@ -983,8 +987,6 @@ private:
   mutable VerIdxs   s_vis;                         // s_vis is key value(s) - needs to be changed to versioned indices, m_vis
           CncrStr*  m_csp;                         // csp is concurrent store pointer
 
-  u32            nxtIdx(u32 i)                 const { return (i+1)%m_sz; }
-  u32           prevIdx(u32 i)                 const { return std::min(i-1, m_sz-1); }        // clamp to m_sz-1 for the case that hash==0, which will result in an unsigned integer wrap
   VerIdx       store_vi(u32 i, u64 vi)         const
   {
     using namespace std;
@@ -1130,7 +1132,7 @@ public:
 
     u32  i = hash % m_sz;
     u32 en = prevIdx(i); 
-    for(;; i=nxtIdx(i) )
+    for(; i!=en ; i=nxtIdx(i) )
     {
       VerIdx vi = load(i);
       if(vi.idx>=DELETED){continue;}
@@ -1150,7 +1152,8 @@ public:
 
       if(m==MATCH_REMOVED || i==en){ return empty; }
     }
-    //return empty;   // unreachable
+    
+    return empty;   // not unreachable
   }
 
   bool          init(u32    sz, CncrStr* cs)
@@ -1175,7 +1178,8 @@ public:
       if(vi.idx < DELETED){break;}
       idx = (idx+1) % m_sz;                                             // don't increment idx above since break comes before it here
 
-      if(idx==stIdx) return SLOT_END;
+      if(idx==stIdx)
+        return SLOT_END;
     }while(true);
 
     return  idx;
@@ -1226,7 +1230,9 @@ public:
     m_csp->put(lstVi.idx, key, klen, val, vlen);
 
     VerIdx vi = putHashed(hash, lstVi, key, klen);
-    if(vi.idx<DELETED){ m_csp->free(vi.idx, vi.version); }                         // putHashed returns the entry that was there before, which is the entry that was replaced. If it wasn't empty, we free it here. 
+    if(vi.idx<DELETED){ 
+      m_csp->free(vi.idx, vi.version);
+    }                         // putHashed returns the entry that was there before, which is the entry that was replaced. If it wasn't empty, we free it here. 
 
     return true;
   }
@@ -1249,6 +1255,9 @@ public:
     if(i%2==1) return VerIdx(hi32(cur), lo32(cur));
     else       return VerIdx(lo32(cur), hi32(cur));
   }
+  u32         nxtIdx(u32 i) const { return (i+1)%m_sz; }
+  u32        prevIdx(u32 i) const { return std::min(i-1, m_sz-1); }        // clamp to m_sz-1 for the case that hash==0, which will result in an unsigned integer wrap
+
 };
 struct  SharedMem
 {
@@ -1269,6 +1278,19 @@ struct  SharedMem
   u64              size;
   bool            owner;
   char             path[256];
+
+  void mv(SharedMem&& rval)
+  {
+    fileHndl = rval.fileHndl;
+    hndlPtr = rval.hndlPtr;
+    ptr = rval.ptr;
+    size = rval.size;
+    owner = rval.owner;
+
+    strncpy(path, rval.path, sizeof(path));
+
+    rval.clear();
+  }
 
 public:
   static void        FreeAnon(SharedMem& sm)
@@ -1413,18 +1435,8 @@ public:
 
   SharedMem(){}
   SharedMem(SharedMem&)       = delete;
-  SharedMem(SharedMem&& rval)
-  {
-    fileHndl       =  rval.fileHndl;
-    hndlPtr        =  rval.hndlPtr;
-    ptr            =  rval.ptr;
-    size           =  rval.size;
-    owner          =  rval.owner;
-
-    strncpy(path, rval.path, sizeof(path));
-
-    rval.clear();
-  }
+  SharedMem(SharedMem&& rval){ mv(std::move(rval)); }
+  SharedMem& operator=(SharedMem&& rval){ mv(std::move(rval)); return *this; }
   ~SharedMem()
   {
     if(ptr){
@@ -1486,6 +1498,7 @@ public:
   static const u32     SLOT_END = CncrHsh::SLOT_END;
   static const u32     LIST_END = CncrStr::LIST_END;
 
+private:
   static u64        OffsetBytes(){ return sizeof(au64)*3; }
   static u64            MemSize(u64 blockSize, u64 blockCount)
   {
@@ -1499,6 +1512,26 @@ public:
   }
   static bool           IsEmpty(VerIdx vi){return CncrHsh::IsEmpty(vi);}         // special value for CncrHsh
   static bool         IsListEnd(VerIdx vi){return CncrStr::IsListEnd(vi);}       // special value for CncrStr
+
+  void mv(simdb&& rval)
+  {
+    using namespace std;
+    
+    s_flags      = rval.s_flags;
+    s_cnt        = rval.s_cnt;
+    s_blockSize  = rval.s_blockSize;
+    s_blockCount = rval.s_blockCount;
+    memcpy(&s_cs, &rval.s_cs, sizeof(s_cs));
+    memcpy(&s_ch, &rval.s_ch, sizeof(s_ch));
+
+    m_mem       =  move(rval.m_mem);
+    m_error     =  rval.m_error;
+    m_nxtChIdx  =  rval.m_nxtChIdx;
+    m_curChIdx  =  rval.m_curChIdx;
+    m_blkCnt    =  rval.m_blkCnt;
+    m_blkSz     =  rval.m_blkSz;
+    m_isOpen    =  rval.m_isOpen;    
+  }
 
 public:
   simdb(){}
@@ -1524,13 +1557,14 @@ public:
       s_cnt->store(1);
     }else{
       #if defined(_WIN32)                                          // do we need to spin until ready on windows? unix has file locks built in to the system calls
-        while(s_flags->load()<1){continue;}
+        //while(s_flags->load()<1){continue;}
       #endif
       s_cnt->fetch_add(1);
       m_mem.size = MemSize(s_blockSize->load(), s_blockCount->load());
     }
 
-    auto cncrHashSize = CncrHsh::sizeBytes(blockCount);
+    //auto cncrHashSize = CncrHsh::sizeBytes(blockCount);
+    uint64_t cncrHashSize = CncrHsh::sizeBytes(s_blockCount->load());
     new (&s_cs) CncrStr( ((u8*)m_mem.data())+cncrHashSize+OffsetBytes(), 
                                  (u32)s_blockSize->load(), 
                                  (u32)s_blockCount->load(), 
@@ -1548,6 +1582,9 @@ public:
     if(isOwner()){ s_flags->store(1); }
   }
   ~simdb(){ close(); }
+
+  simdb(simdb&& rval){ mv(std::move(rval)); }
+  simdb& operator=(simdb&& rval){ mv(std::move(rval)); return *this; }
 
   i64          len(const void *const key, u32 klen, u32* out_vlen=nullptr, u32* out_version=nullptr) const
   {
@@ -1677,18 +1714,19 @@ public:
     bool      ok = false;
     i64     prev = (i64)m_nxtChIdx;
     VerIdx viNxt = this->nxt();
-    i64      cur = (i64)m_nxtChIdx;
+    i64     inxt = (i64)m_nxtChIdx;
+    u32      cur = s_ch.prevIdx((u32)(inxt));
 
     if(searched){
-      *searched = (cur-prev)>=0?  cur-prev-1  :  (m_blkCnt-prev)+cur;   //(m_blkCnt-prev-1) + cur+1;
+      *searched = (inxt-prev-1)>0?  inxt-prev-1  :  (m_blkCnt-prev)+inxt;   //(m_blkCnt-prev-1) + inxt+1;
     }
     if(viNxt.idx>=DELETED){ return {viNxt.version, ""}; }
     
-    i64 total_len = this->len(cur-1, viNxt.version, &klen, &vlen);
+    i64 total_len = this->len(cur, viNxt.version, &klen, &vlen);
     if(total_len==0){ return {viNxt.version, ""}; }
     
     str key(klen,'\0');
-    ok         = this->getKey(cur-1, viNxt.version, 
+    ok         = this->getKey(cur, viNxt.version, 
                               (void*)key.data(), klen); 
                               
     if(!ok || strlen(key.c_str())!=key.length() )
@@ -1802,7 +1840,7 @@ public:
       size_t  pfxSz   = sizeof(wPrefix);
       if( strncmp( (char*)info->name.Buffer, (char*)wPrefix, pfxSz)!=0 ){  continue; }
 
-      wstring  wname = wstring( (WCHAR*)info->name.Buffer );
+      wstring  wname = wstring( ((WCHAR*)info->name.Buffer)+6 );
       wstring_convert<codecvt_utf8<wchar_t>> cnvrtr;
       string    name = cnvrtr.to_bytes(wname);
 
@@ -1839,7 +1877,7 @@ public:
       }
 
       if(strncmp(dent->d_name, prefix, pfxSz)==0){
-        ret.push_back(dent->d_name);
+        ret.push_back(dent->d_name + 6);
       }
     }
 
@@ -1851,7 +1889,5 @@ public:
 
 
 #endif
-
-
 
 
