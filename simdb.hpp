@@ -1328,7 +1328,8 @@ public:
       if(!raw_path){ strcpy(sm.path, "simdb_"); }
     #elif defined(__APPLE__) || defined(__MACH__) || defined(__unix__) || defined(__FreeBSD__) || defined(__linux__)  // osx, linux and freebsd
       sm.fileHndl = 0;
-      strcpy(sm.path, P_tmpdir "/simdb_");
+      memset(sm.path, 0, sizeof(sm.path));
+      if(!raw_path){ strcpy(sm.path, P_tmpdir "/simdb_"); }
     #endif
 
     u64 len = strlen(sm.path) + strlen(name);
