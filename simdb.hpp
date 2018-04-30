@@ -107,6 +107,30 @@
 
 */
 
+// -todo: make a list cut itself off at the end by inserting LIST_END as the last value 
+// -todo: look into readers and matching - should two threads with the same key ever be able to double insert into the db? - MATCH_REMOVED was not re-looping on the current index
+// -todo: make MATCH_REMOVED restart the current index
+// -todo: make runIfMatch return a pair that includes the return value of the function it runs
+// -todo: make sure version setting on free sets the version to 0 on the whole list
+// -todo: make sure incReaders and decReaders are using explicit sequential consistency - already done
+// -todo: make sure that if there is a version mismatch when comparing a block list, the block list version is still used when trying to swap the version+idx - would only the index actually be needed since a block list with incremented readers won't give up its index, thus it should be unique?
+// -todo: take version argument out of incReaders and decReaders
+// -todo: make a temporary thread_local variable for each thread to count how many allocations it has made and how many allocations it has freed - worked very well to narrow down the problem
+// -todo: make sure that the VerIdx being returned from putHashed is actually what was atomically swapped out
+// -todo: try putting LIST_END at the end of the the concurrent lists - not needed for now
+// -todo: debug why 2 threads inserting the same key seems to need all blocks instead of just 3 * 2 * 2 (three blocks per key * two threads * two block lists per thread) - delete flag in block lists was not always set
+// -todo: assert that the block list is never already deleted when being deleted from putHashed - that wasn't the problem
+// -todo: check what happens when the same key but different versions are inserted - do two different versions end up in the DB? does one version end up undeletable ?  - this was fixed by only comparing the key without the version
+// -todo: check path of thread that deletes a key, make sure it replaces the index in the hash map - how do two conflicting indices in the hash map resolve? the thread that replaces needs to delete the old allocation using the version - is the version / deleted flag being changed atomically in the block list 
+// -todo: change the Match enum to be an bit bitfield with flags - not needed for now
+// -todo: make simdb len() and get() ignore version numbers for match and only match keys
+
+// todo: make sure get() only increments and decrements the first/key block in the block list
+// todo: make simdb give a proper error if running out of space
+// todo: make simdb expand when eighther out of space or initialized with a larger amount of space
+// todo: make a get function that takes a key version struct
+// todo: make a get function that returns a tbl if tbl.hpp is included
+
 #ifdef _MSC_VER
   #pragma once
   #pragma warning(push, 0)
@@ -132,10 +156,21 @@
   #include <codecvt>
 
   #include <tchar.h>
+
+  //#ifdef UNICODE
+  //  #undef UNICODE
+  //#endif
   #define NOMINMAX
   #define WIN32_LEAN_AND_MEAN
   #include <windows.h>
   #include <strsafe.h>
+
+  #ifdef MIN
+    #undef MIN
+  #endif
+  #ifdef MAX
+    #undef MAX
+  #endif
 
   #ifdef _MSC_VER
     #if !defined(_CRT_SECURE_NO_WARNINGS)
@@ -185,8 +220,13 @@
   typedef unsigned long ULONG;
 #endif
 
+//#ifndef NDEBUG
+  thread_local int __simdb_allocs   = 0;
+  thread_local int __simdb_deallocs = 0;
+//#endif
+
 namespace {
-  enum Match { MATCH_FALSE=0, MATCH_TRUE=1, MATCH_REMOVED=-1  };
+  enum Match { MATCH_FALSE=0, MATCH_TRUE=1, MATCH_REMOVED = -1, MATCH_TRUE_WRONG_VERSION = -2  };
 
   template<class T>
   class lava_noop
@@ -326,7 +366,7 @@ namespace {
       va_list argptr;
           
       va_start( argptr, format );
-      retValue = wvsprintf( szBuff, format, argptr );
+      retValue = wvsprintfA( szBuff, format, argptr );
       va_end( argptr );
 
       WriteFile(  GetStdHandle(STD_OUTPUT_HANDLE), szBuff, retValue,
@@ -404,7 +444,8 @@ class     CncrLst
 public:
   using     u32  =  uint32_t;
   using     u64  =  uint64_t;
-  using    au64  =  std::atomic<u64>;
+  using    au32  =  volatile std::atomic<u32>;
+  using    au64  =  volatile std::atomic<u64>;
   using ListVec  =  lava_vec<u32>;
 
   union Head
@@ -416,12 +457,12 @@ public:
   static const u32        LIST_END = 0xFFFFFFFF;
   static const u32 NXT_VER_SPECIAL = 0xFFFFFFFF;
 
-private:
-  ListVec     s_lv;
-  au64*        s_h;
+//private:
+  ListVec         s_lv;
+  volatile au64*   s_h;
 
 public:
-  static u64   sizeBytes(u32 size) { return ListVec::sizeBytes(size) + 128; }         // an extra 128 bytes so that Head can be placed
+  static u64   sizeBytes(u32 size) { return ListVec::sizeBytes(size) + 128; }         // an extra 128 bytes so that Head can be placed (why 128 bytes? so that the head can be aligned on its own cache line to avoid false sharing, since it is a potential bottleneck)
   static u32  incVersion(u32    v) { return v==NXT_VER_SPECIAL?  1  :  v+1; }
 
   CncrLst(){}
@@ -444,16 +485,61 @@ public:
     }
   }
 
+  bool headCmpEx(u64* expected, au64 desired)
+  {
+    using namespace std;
+
+    //return atomic_compare_exchange_strong_explicit(
+    //  s_h, (volatile au64*)&expected, desired,
+    //  memory_order_seq_cst, memory_order_seq_cst
+    //  );
+
+    //return atomic_compare_exchange_strong(
+    //  s_h, (volatile au64*)&expected, desired
+    //);
+
+    return atomic_compare_exchange_strong_explicit(
+      s_h, expected, desired,
+      memory_order_seq_cst, memory_order_seq_cst
+    );
+  }
   u32        nxt()                                                             // moves forward in the list and return the previous index
   {
     Head  curHead, nxtHead;
     curHead.asInt  =  s_h->load();
     do{
-      if(curHead.idx==LIST_END){return LIST_END;}
+      if(curHead.idx==LIST_END){
+        return LIST_END;
+      }
 
       nxtHead.idx  =  s_lv[curHead.idx];
       nxtHead.ver  =  curHead.ver==NXT_VER_SPECIAL? 1  :  curHead.ver+1;
-    }while( !s_h->compare_exchange_strong(curHead.asInt, nxtHead.asInt) );
+    }while( !headCmpEx( &curHead.asInt, nxtHead.asInt) );
+    //}while( !headCmpEx(curHead.asInt, nxtHead.asInt) );
+    //}while( !s_h->compare_exchange_strong(curHead.asInt, nxtHead.asInt) );
+
+    return curHead.idx;
+  }
+  u32        nxt(u32 prev)                                                             // moves forward in the list and return the previous index
+  {
+    using namespace std;
+    
+    Head  curHead, nxtHead, prevHead;
+    curHead.asInt  =  s_h->load();
+    do{
+      if(curHead.idx==LIST_END){
+        return LIST_END;
+      }
+
+      prevHead     =  curHead;
+      nxtHead.idx  =  s_lv[curHead.idx];
+      nxtHead.ver  =  curHead.ver==NXT_VER_SPECIAL? 1  :  curHead.ver+1;
+    }while( !headCmpEx( &curHead.asInt, nxtHead.asInt) );
+    //}while( !headCmpEx(curHead.asInt, nxtHead.asInt) );
+    //}while( !s_h->compare_exchange_strong(curHead.asInt, nxtHead.asInt) );
+
+    //s_lv[prev] = curHead.idx;
+    atomic_store( (au32*)&s_lv[prev], curHead.idx);
 
     return curHead.idx;
   }
@@ -465,21 +551,50 @@ public:
       retIdx = s_lv[idx] = curHead.idx;
       nxtHead.idx  =  idx;
       nxtHead.ver  =  curHead.ver + 1;
-    }while( !s_h->compare_exchange_strong(curHead.asInt, nxtHead.asInt) );
+    }while( !headCmpEx( &curHead.asInt, nxtHead.asInt) );
+    //}while( !headCmpEx(curHead.asInt, nxtHead.asInt) );
+    //}while( !s_h->compare_exchange_strong(curHead.asInt, nxtHead.asInt) );
 
     return retIdx;
   }
   u32        free(u32 st, u32 en)                                            // not thread safe when reading from the list, but it doesn't matter because you shouldn't be reading while freeing anyway, since the CncrHsh will already have the index taken out and the free will only be triggered after the last reader has read from it 
   {
+    using namespace std;
+  
     Head curHead, nxtHead; u32 retIdx;
     curHead.asInt = s_h->load();
     do{
-      retIdx = s_lv[en] = curHead.idx;
+      //retIdx = s_lv[en] = curHead.idx;
+      retIdx = curHead.idx;
+      atomic_store_explicit( (au32*)&(s_lv[en]), curHead.idx, memory_order_seq_cst);
+      //atomic_store( (au32*)&(s_lv[en]), curHead.idx);
       nxtHead.idx  =  st;
       nxtHead.ver  =  curHead.ver + 1;
-    }while( !s_h->compare_exchange_strong(curHead.asInt, nxtHead.asInt) );
+    }while( !headCmpEx( &curHead.asInt, nxtHead.asInt) );
+    //}while( !headCmpEx(curHead.asInt, nxtHead.asInt) );
+    //}while( !s_h->compare_exchange_strong(curHead.asInt, nxtHead.asInt) );
 
     return retIdx;
+  }
+  u32       alloc(u32 count)
+  {
+    u32   st = nxt();
+    u32  cur = st;
+    if(st == LIST_END) return LIST_END;
+    else --count;
+
+    while( count > 0 ){
+      u32 nxtIdx = nxt(cur);
+      if(nxtIdx == LIST_END){
+        free(st,cur);
+        return LIST_END;
+      }
+      cur = nxtIdx;
+      --count;
+    }
+
+    //s_lv[cur] = LIST_END;
+    return st;
   }
   auto      count() const -> u32 { return ((Head*)s_h)->ver; }
   auto        idx() const -> u32
@@ -566,47 +681,76 @@ public:
     return empty.asInt == vi.asInt;
   }
 
-  BlkLst    incReaders(u32 blkIdx, u32 version) const                                  // BI is Block Index  increment the readers by one and return the previous kv from the successful swap 
+  bool           cmpEx(au32* val, u32* expected, u32 desired) const
   {
+    using namespace std;
+    return atomic_compare_exchange_strong_explicit(
+      val, expected, desired,
+      memory_order_seq_cst, memory_order_seq_cst
+    );
+  }
+  BlkLst    incReaders(u32 blkIdx) const //u32 version) const                                  // BI is Block Index  increment the readers by one and return the previous kv from the successful swap 
+  {
+    using namespace std;
+    
     KeyReaders cur, nxt;
     BlkLst*     bl  =  &s_bls[blkIdx];
     au32* areaders  =  (au32*)&(bl->kr);
-    cur.asInt       =  areaders->load();
+    cur.asInt       =  atomic_load_explicit(areaders, memory_order_seq_cst);
     do{
-      if(bl->version!=version || cur.readers<0 || cur.isDeleted){ return BlkLst(); }
+      if(cur.readers<0 || cur.isDeleted){ return BlkLst(); }
       nxt = cur;
       nxt.readers += 1;
-    }while( !areaders->compare_exchange_strong(cur.asInt, nxt.asInt) );
-    
+    }while( !cmpEx(areaders, &cur.asInt, nxt.asInt) );
+
     return *bl;  // after readers has been incremented this block list entry is not going away. The only thing that would change would be the readers and that doesn't matter to the calling function.
+
+    //cur.asInt       =  areaders->load();
+    //
+    //if(bl->version!=version || cur.readers<0 || cur.isDeleted){ return BlkLst(); }
+    //
+    //}while( !areaders->compare_exchange_strong(cur.asInt, nxt.asInt) );
   }
-  bool      decReadersOrDel(u32 blkIdx, u32 version, bool del=false) const                   // BI is Block Index  increment the readers by one and return the previous kv from the successful swap 
+  //bool      decReadersOrDel(u32 blkIdx, u32 version, bool del=false) const                   // BI is Block Index  increment the readers by one and return the previous kv from the successful swap 
+  bool      decReadersOrDel(u32 blkIdx, bool del=false) const                   // BI is Block Index  increment the readers by one and return the previous kv from the successful swap 
   {
-    KeyReaders cur, nxt; bool doDelete;
+    using namespace std;
+
+    KeyReaders cur, nxt; bool doDelete=false;
 
     BlkLst*     bl  =  &s_bls[blkIdx];
     au32* areaders  =  (au32*)&(bl->kr);
-    cur.asInt       =  areaders->load();
+    cur.asInt       =  atomic_load_explicit(areaders, memory_order_seq_cst);
     do{
       doDelete = false;
-      if(bl->version!=version){ return false; }
-      nxt          = cur;
+      nxt      = cur;
       if(del){
-        if(cur.readers==0 && !cur.isDeleted){ doDelete=true; }
+        if(cur.isDeleted){ return true; }
+        if(cur.readers==0){
+          doDelete      = true; 
+        }
         nxt.isDeleted = true;
       }else{
         if(cur.readers==1 &&  cur.isDeleted){ doDelete=true; }
         nxt.readers  -= 1;    
       }
-    }while( !areaders->compare_exchange_strong(cur.asInt, nxt.asInt) );
+    }while( !cmpEx(areaders, &cur.asInt, nxt.asInt) );
     
     if(doDelete){ doFree(blkIdx); return false; }
 
     return true;
+    
+    //cur.asInt       =  areaders->load();
+    //if(bl->version!=version){ return false; }
+    //
+    //if(cur.readers==0 && !cur.isDeleted){ doDelete=true; }
+    //
+    //}while( !areaders->compare_exchange_strong(cur.asInt, nxt.asInt) );
+    //
     //return cur.isDeleted;
   }
 
-private:
+//private:
   // s_ variables are used to indicate data structures and memory that is in the shared memory, usually just a pointer on the stack and of course, nothing on the heap
   // The order of the shared memory as it is in the memory mapped file: Version, CncrLst, BlockLists, Blocks
   mutable CncrLst           s_cl;        // flat data structure - pointer to memory 
@@ -638,19 +782,44 @@ private:
   }
   u32 findEndSetVersion(u32  blkIdx, u32 version)  const                  // find the last BlkLst slot in the linked list of blocks to free 
   {
-    u32 cur=blkIdx, prev=blkIdx;
+    u32 cur=blkIdx, prev=blkIdx;   // the first index will have its version set twice
     while(cur != LIST_END){
-      s_bls[prev].version = version;
+      s_bls[cur].version = version;
       prev = cur;
       cur  = s_bls[cur].idx;
     }
-
     return prev;
+
+    //assert(s_cl.s_lv[cur] == s_bls[cur].idx);
+    //
+    //sim_assert(s_cl.s_lv[cur]==s_bls[cur].idx, s_cl.s_lv[cur], s_bls[cur].idx );
+    //
+    //auto lvIdx = s_cl.s_lv[cur];
+    //auto blsIdx = s_bls[cur].idx;
+    //sim_assert(lvIdx == blsIdx, lvIdx, blsIdx );
+    //
+    //sim_assert(s_cl.s_lv[prev]==s_bls[prev].idx, s_cl.s_lv[prev], s_bls[prev].idx );
+    //
+    //return cur;
   }
   void           doFree(u32  blkIdx)  const                                                // frees a list/chain of blocks - don't need to zero out the memory of the blocks or reset any of the BlkLsts' variables since they will be re-initialized anyway
   {
+    using namespace std;
+
     u32 listEnd  =  findEndSetVersion(blkIdx, 0); 
+
+
+    //sim_assert(s_lv[en], s_lv[en] == LIST_END, en);
+    //assert(s_cl.s_lv[listEnd] == LIST_END);
+
     s_cl.free(blkIdx, listEnd);
+
+    __simdb_deallocs += 1;
+
+    // doesn't work - LIST_END only works for allocation
+    //u32 cur = blkIdx;
+    //while(cur != LIST_END)
+    //  cur = s_cl.free(cur);
   }
   u32        writeBlock(u32  blkIdx, void const* const bytes, u32 len=0, u32 ofst=0)       // don't need to increment readers since write should be done before the block is exposed to any other threads
   {
@@ -664,12 +833,15 @@ private:
   }
   u32         readBlock(u32  blkIdx, u32 version, void *const bytes, u32 ofst=0, u32 len=0) const
   {
-    BlkLst bl = incReaders(blkIdx, version);               if(bl.version==0){ return 0; }
+    //BlkLst bl = incReaders(blkIdx, version);               
+    BlkLst bl = incReaders(blkIdx);
+      if(bl.version==0){ return 0; }
       u32   blkFree  =  blockFreeSize();
       u8*         p  =  blockFreePtr(blkIdx);
       u32    cpyLen  =  len==0?  blkFree-ofst  :  len;
       memcpy(bytes, p+ofst, cpyLen);
-    decReadersOrDel(blkIdx, version);
+    decReadersOrDel(blkIdx);
+    //decReadersOrDel(blkIdx, version);
 
     return cpyLen;
   }
@@ -700,35 +872,32 @@ public:
   {
     u32  byteRem = 0;
     u32   blocks = blocksNeeded(size, &byteRem);
-    u32       st = s_cl.nxt();
-    SECTION(get the starting block index and handle errors)
-    {
+    u32       st = s_cl.alloc(blocks);
+    SECTION(handle allocation errors from the concurrent list){
       if(st==LIST_END){
-        if(out_blocks){ *out_blocks = {1, 0} ; } 
+        if(out_blocks){ *out_blocks = {true, 0} ; } 
         return List_End(); 
       }
     }
 
-
     u32  ver = (u32)s_version->fetch_add(1);
-    u32  cur = st;
-    u32  nxt = 0;
-    u32  cnt = 0;
+    u32  cur=st, cnt=0;
     SECTION(loop for the number of blocks needed and get new block and link it to the list)
     {
-      for(u32 i=0; i<blocks-1; ++i)
-      {
-        nxt = s_cl.nxt();
-        if(nxt==LIST_END){ free(st, ver); VerIdx empty={LIST_END,0}; return empty; } // todo: will this free the start  if the start was never set? - will it just reset the blocks but free the index?
-
+      for(u32 i=0; i<blocks-1; ++i, ++cnt){
+        u32 nxt    = s_cl.s_lv[cur];
         s_bls[cur] = BlkLst(false, 0, nxt, ver, size);
         cur        = nxt;
-        ++cnt;
       }
     }
 
     SECTION(add the last index into the list, set out_blocks and return the start index with its version)
     {      
+      if(out_blocks){
+        out_blocks->end = s_cl.s_lv[cur] == LIST_END;
+        out_blocks->cnt = cnt;
+      }     
+
       s_bls[cur] = BlkLst(false,0,LIST_END,ver,size,0,0);       // if there is only one block needed, cur and st could be the same
 
       auto b = s_bls[st]; // debugging
@@ -736,20 +905,19 @@ public:
       s_bls[st].isKey = true;
       s_bls[st].hash  = hash;
       s_bls[st].len   = size;
-      s_bls[st].klen  = klen; // set deleted to false?
+      s_bls[st].klen  = klen;
       s_bls[st].isDeleted = false;
 
-      if(out_blocks){
-        out_blocks->end = nxt==LIST_END;
-        out_blocks->cnt = cnt;
-      }     
+      __simdb_allocs += 1;
+
       VerIdx vi(st, ver);
       return vi;
     }
   }
   bool         free(u32  blkIdx, u32 version)                                                             // doesn't always free a list/chain of blocks - it decrements the readers and when the readers gets below the value that it started at, only then it is deleted (by the first thread to take it below the starting number)
   {
-    return decReadersOrDel(blkIdx, version, true);
+    //return decReadersOrDel(blkIdx, version, true);
+    return decReadersOrDel(blkIdx, true);
   }
   void          put(u32  blkIdx, void const *const kbytes, u32 klen, void const *const vbytes, u32 vlen)  // don't need version because this will only be used after allocating and therefore will only be seen by one thread until it is inserted into the ConcurrentHash
   {
@@ -791,8 +959,9 @@ public:
 
     if(blkIdx == LIST_END){ return 0; }
 
-    BlkLst bl = incReaders(blkIdx, version);
-    
+    //BlkLst bl = incReaders(blkIdx, version);
+    BlkLst bl = incReaders(blkIdx);
+
     u32 vlen = bl.len-bl.klen;
     if(bl.len==0 || vlen>maxlen ) return 0;
 
@@ -829,7 +998,8 @@ public:
     if(out_readlen){ *out_readlen = len; }
 
   read_failure:
-    decReadersOrDel(blkIdx, version);
+    decReadersOrDel(blkIdx, false);
+    //decReadersOrDel(blkIdx, version);
 
     return len;                                                                    // only one return after the top to make sure readers can be decremented - maybe it should be wrapped in a struct with a destructor
   }
@@ -837,8 +1007,9 @@ public:
   {
     if(blkIdx == LIST_END){ return 0; }
 
-    BlkLst bl = incReaders(blkIdx, version);
-    
+    //BlkLst bl = incReaders(blkIdx, version);
+    BlkLst bl = incReaders(blkIdx);
+
     if(bl.len==0 || (bl.klen)>maxlen ) return 0;
 
     auto   kdiv = div((i64)bl.klen, (i64)blockFreeSize());
@@ -864,20 +1035,23 @@ public:
     len   +=  rdLen;
 
   read_failure:
-    decReadersOrDel(blkIdx, version);
+    decReadersOrDel(blkIdx);
+    //decReadersOrDel(blkIdx, version);
 
     return len;                                           // only one return after the top to make sure readers can be decremented - maybe it should be wrapped in a struct with a destructor    
   }
   Match   memcmpBlk(u32  blkIdx, u32 version, void const *const buf1, void const *const buf2, u32 len) const    // todo: eventually take out the inc and dec readers and only do them when actually reading and dealing with the whole chain of blocks 
-  { // todo: take out inc and dec here, since the whole block list should be read and protected by start of the list
-    if(incReaders(blkIdx, version).len==0){ return MATCH_REMOVED; }
+  { 
+    // todo: take out inc and dec here, since the whole block list should be read and protected by start of the list
+    //if(incReaders(blkIdx, version).len==0){ return MATCH_REMOVED; }
       auto ret = memcmp(buf1, buf2, len);
-    bool freed = !decReadersOrDel(blkIdx, version);
+    //bool freed = !decReadersOrDel(blkIdx, version);
 
-    if(freed){       return MATCH_REMOVED; }
-    else if(ret==0){ return MATCH_TRUE;    }
+    //if(freed){       return MATCH_REMOVED; }
+    //else if(ret==0){ return MATCH_TRUE;    }
 
-    return MATCH_FALSE;
+    if(ret==0){  return MATCH_TRUE;  }
+    else      {  return MATCH_FALSE; }
   }
   Match     compare(u32  blkIdx, u32 version, void const *const buf, u32 len, u32 hash) const
   {
@@ -886,26 +1060,39 @@ public:
     BlkLst     bl = s_bls[blkIdx];
     u32 blklstHsh = bl.hash;
     if(blklstHsh!=hash){ return MATCH_FALSE; }                         // vast majority of calls should end here
+    bool   verOk  =  bl.version == version;
 
     u32   curidx  =  blkIdx;
-    VerIdx   nxt  =  nxtBlock(curidx);                              if(nxt.version!=version){ return MATCH_FALSE; }
+    VerIdx   nxt  =  nxtBlock(curidx);               
+    //bool   verOk  =  nxt.version == version;
+    //if(nxt.version!=version){ return MATCH_FALSE; }
+    
     u32    blksz  =  (u32)blockFreeSize();
     u8*   curbuf  =  (u8*)buf;
-    auto    klen  =  s_bls[blkIdx].klen;                            if(klen!=len){ return MATCH_FALSE; }
+    auto    klen  =  s_bls[blkIdx].klen;                            
+    if(klen!=len){ return MATCH_FALSE; }
+    
     auto  curlen  =  len;
     while(true)
     {
       auto p = blockFreePtr(curidx);
       if(blksz > curlen){
-        return memcmpBlk(curidx, version, curbuf, p, curlen);
+        Match cmpBlk = memcmpBlk(curidx, version, curbuf, p, curlen);                   // the end 
+        if(cmpBlk != MATCH_TRUE) return cmpBlk; //MATCH_FALSE;
+
+        return verOk? MATCH_TRUE  :  MATCH_TRUE_WRONG_VERSION;
       }else{
-        Match cmp = memcmpBlk(curidx, version, curbuf, p, blksz);   if(cmp!=MATCH_TRUE){ return cmp; }
+        Match cmp = memcmpBlk(curidx, version, curbuf, p, blksz);   
+        if(cmp!=MATCH_TRUE){ return cmp; }
       }
 
       curbuf  +=  blksz;
       curlen  -=  blksz;
       curidx   =  nxt.idx;
-      nxt      =  nxtBlock(curidx);                                 if(nxt.version!=version){ return MATCH_FALSE; }
+      nxt      =  nxtBlock(curidx);                                 
+      
+      verOk   &=  nxt.version != version;
+      //if(nxt.version!=version){ return MATCH_FALSE; }
     }
   }
   u32           len(u32  blkIdx, u32 version, u32* out_vlen=nullptr) const
@@ -996,7 +1183,8 @@ private:
     if(odd) strVi = VerIdx(lo32(vi), hi32(vi));                                               // the odd numbers need to be swapped so that their indices are on the outer border of 128 bit alignment - the indices need to be on the border of the 128 bit boundary so they can be swapped with an unaligned 64 bit atomic operation
     else    strVi = VerIdx(hi32(vi), lo32(vi));
 
-    u64 prev = atomic_exchange<u64>( (au64*)(s_vis.data()+i), *((u64*)(&strVi)) );
+    u64 prev = atomic_exchange_explicit( (au64*)(s_vis.data()+i), *((u64*)(&strVi)), memory_order_seq_cst);
+    //u64 prev = atomic_exchange<u64>( (au64*)(s_vis.data()+i), *((u64*)(&strVi)) );
 
     if(odd) return VerIdx(lo32(prev), hi32(prev));
     else    return VerIdx(hi32(prev), lo32(prev));
@@ -1008,14 +1196,15 @@ private:
     u64     exp = i%2? swp32(expected.asInt) : expected.asInt;                                // if the index (i) is odd, swap the upper and lower 32 bits around
     u64    desi = i%2? swp32(desired.asInt) : desired.asInt;                                  // desi is desired int
     au64*  addr = (au64*)(s_vis.data()+i);
-    bool     ok = addr->compare_exchange_strong( exp, desi );
-    
+    //bool     ok = addr->compare_exchange_strong( exp, desi );
+    bool     ok = atomic_compare_exchange_strong_explicit(addr, &exp, desi, memory_order_seq_cst, memory_order_seq_cst);
+
     return ok;
   }
-  void           doFree(u32 i)                 const
-  {
-    store_vi(i, empty_vi().asInt);
-  }
+  //void           doFree(u32 i)                 const
+  //{
+  //  store_vi(i, empty_vi().asInt);
+  //}
   VerIpd            ipd(u32 i, u32 blkIdx)     const                                          // ipd is Ideal Position Distance - it is the distance a CncrHsh index value is from the position that it gets hashed to 
   {
     BlkLst bl = m_csp->blkLst(blkIdx);
@@ -1034,17 +1223,49 @@ private:
     return load(*out_idx);
   }
 
-  template<class FUNC> 
-  bool       runIfMatch(VerIdx vi, const void* const buf, u32 len, u32 hash, FUNC f) const 
-  { // todo: should this increment and decrement the readers, as well as doing something different if it was the thread that freed the blocks
-    //VerIdx kv = incReaders(vi.idx, vi.version);
-      Match      m = m_csp->compare(vi.idx, vi.version, buf, len, hash);
-      bool matched = false;                                                   // not inside a scope
-      if(m==MATCH_TRUE){ matched=true; f(vi); }
-    //decReaders(vi.idx, vi.version);    
-    //decReaders(i);
+  //bool       runIfMatch(VerIdx vi, const void* const buf, u32 len, u32 hash, FUNC f) const 
+  //Match       runIfMatch(VerIdx vi, const void* const buf, u32 len, u32 hash, FUNC f) const 
+  template<class FUNC, class T>
+  auto       runIfMatch(VerIdx vi, const void* const buf, u32 len, u32 hash, FUNC f, T defaultRet = decltype(f(vi))() ) const -> std::pair<Match, T>   // std::pair<Match, decltype(f(vi))>
+  { 
+    Match m;
+    T funcRet = defaultRet;                                                                   
+
+    //auto b = m_csp->incReaders(vi.idx, vi.version);
+    auto b = m_csp->incReaders(vi.idx);
+    SECTION(work on the now protected block list without returning until after the readers are decremented)
+    {
+      if(b.isDeleted){
+        m = MATCH_REMOVED;
+      }else{
+        m = m_csp->compare(vi.idx, vi.version, buf, len, hash);
+        if(m==MATCH_TRUE || m==MATCH_TRUE_WRONG_VERSION){
+          //funcRet = f(vi); 
+          funcRet = f( VerIdx(vi.idx, b.version) );
+        }
+      }
+    }
+    //if( !m_csp->decReadersOrDel(vi.idx, vi.version, false) ){ 
+   if( !m_csp->decReadersOrDel(vi.idx,false) ){ 
+      m = MATCH_REMOVED;
+    }
+
+    return {m, funcRet};
     
-    return matched;
+    // todo: should this increment and decrement the readers, as well as doing something different if it was the thread that freed the blocks
+    //
+    //if(b.isDeleted){ m = MATCH_REMOVED; } 
+    //b.
+    //
+    //bool matched = false;  
+    //decltype(f(vi)) funcRet; // not inside a scope
+    //
+    //matched=true; 
+    //
+    //m_csp->decReaders(vi.idx, vi.version);    
+    //decReaders(i);
+    //
+    //return matched;
   }
 
 public:
@@ -1073,16 +1294,17 @@ public:
 
   VerIdx   putHashed(u32 hash, VerIdx lstVi, const void *const key, u32 klen) const
   {
+    // This function needs to return the VerIdx it was given if there was not a place for the allocation, since it would neighther be stored in the hash map or swapped for another VerIdx that will be freed
     using namespace std;
     static const VerIdx empty   = empty_vi();
 
-    VerIdx desired = lstVi;
+    //VerIdx desired = lstVi;
     u32 i=hash%m_sz, en=prevIdx(i);
     for(;; i=nxtIdx(i) )
     {
       VerIdx vi = load(i);
       if(vi.idx>=DELETED){                                                                  // it is either deleted or empty
-        bool success = cmpex_vi(i, vi, desired);
+        bool success = cmpex_vi(i, vi, lstVi);           
         if(success){
           return vi;
         }else{ 
@@ -1091,25 +1313,38 @@ public:
         }                                                                                   // retry the same loop again if a good slot was found but it was changed by another thread between the load and the compare-exchange
       }                                                                                     // Either we just added the key, or another thread did.
 
-      if(m_csp->compare(vi.idx,vi.version,key,klen,hash) != MATCH_TRUE){
-        if(i==en){return empty;}
-        else{continue;}
+      VerIdx foundVi = empty_vi();
+      const auto ths = this;
+      auto         f = [ths,i,lstVi,&foundVi](VerIdx vi){
+        foundVi      = vi;
+        bool success = ths->cmpex_vi(i, vi, lstVi);                                            // this should be hit even when the the versions don't match, since m_csp->compare() will return MATCH_TRUE_WRONG_VERSION
+        return success;
+      };
+      auto cmpAndSuccess = runIfMatch(vi, key, klen, hash, f, false);
+      Match          cmp = cmpAndSuccess.first;
+      bool       success = cmpAndSuccess.second;
+
+      if(cmp==MATCH_FALSE){
+        if(i==en){
+          return lstVi;                                                                      // By returning the given VerIdx, we say that there was no place for it found and it needs to be deallocated
+        }else{ continue; }
+      }else if(cmp==MATCH_REMOVED){                                                          // if the block list is marked as deleted, try this index again, since the index must have changed first
+        i=prevIdx(i); 
+        continue;
       }
 
-      bool success = cmpex_vi(i, vi, desired);
       if(success){ 
-        return vi;
+        return foundVi;
+        //return vi;
       }else{ 
         i=prevIdx(i); 
         continue; 
       }
     }
-
-    // return empty;  // should never be reached
   }
 
-  template<class FUNC> 
-  bool      runMatch(const void *const key, u32 klen, u32 hash, FUNC f)       const 
+  template<class FUNC, class T>
+  bool      runMatch(const void *const key, u32 klen, u32 hash, FUNC f, T defaultRet = decltype(f(vi))() )       const 
   {
     using namespace std;
     
@@ -1118,8 +1353,12 @@ public:
     for(;; i=nxtIdx(i) )
     {
       VerIdx vi = load(i);
-      if(vi.idx!=EMPTY && vi.idx!=DELETED && runIfMatch(vi,key,klen,hash,f) ){ return true; }
-      
+      if(vi.idx!=EMPTY && vi.idx!=DELETED){
+        Match match = runIfMatch(vi,key,klen,hash,f, defaultRet).first;
+
+        if(match==MATCH_TRUE || match==MATCH_TRUE_WRONG_VERSION){ return true; }
+      }
+
       if(i==en){ return false; }
     }
   }
@@ -1196,9 +1435,9 @@ public:
     {
       VerIdx vi = load(i);      
       if(vi.idx!=EMPTY && vi.idx!=DELETED){
+        if(out_version){ *out_version = vi.version; }
         Match m = m_csp->compare(vi.idx, vi.version, key, klen, hash);
         if(m==MATCH_TRUE){
-          if(out_version){ *out_version = vi.version; }
           return m_csp->len(vi.idx, vi.version, out_vlen);
         }        
       }
@@ -1216,23 +1455,37 @@ public:
       return csp->get(vi.idx, vi.version, out_val, vlen, out_readlen);
     };
 
-    return runMatch(key, klen, hash, runFunc);
+    //Match m = runMatch(key, klen, hash, runFunc, 0);
+    return runMatch(key, klen, hash, runFunc, 0);
   }
   bool           put(const void *const key, u32 klen, const void *const val, u32 vlen, u32* out_startBlock=nullptr) 
   {
     assert(klen>0);
+    auto dif = __simdb_allocs - __simdb_deallocs;
 
     u32     hash = CncrHsh::HashBytes(key, klen);
     VerIdx lstVi = m_csp->alloc(klen+vlen, klen, hash);                            // lstVi is block list versioned index
     if(out_startBlock){ *out_startBlock = lstVi.idx; }
-    if(lstVi.idx==LIST_END){ return false; }
+    if(lstVi.idx==LIST_END){ 
+      return false;
+    }
 
-    m_csp->put(lstVi.idx, key, klen, val, vlen);
+    m_csp->put(lstVi.idx, key, klen, val, vlen);                                  // this writes the data into the blocks before exposing them to other threads through the hash map
 
-    VerIdx vi = putHashed(hash, lstVi, key, klen);
+    VerIdx vi = putHashed(hash, lstVi, key, klen);                                // put the versioned index in the hash map by swapping it for whatever is there - if there was another index already there, clean it up by freeing it's concurrent list indices and blocks
     if(vi.idx<DELETED){ 
       m_csp->free(vi.idx, vi.version);
-    }                         // putHashed returns the entry that was there before, which is the entry that was replaced. If it wasn't empty, we free it here. 
+    }                                                                             // putHashed returns the entry that was there before, which is the entry that was replaced. If it wasn't empty, we free it here. 
+    else{
+      auto nxtDif = __simdb_allocs - __simdb_deallocs;
+      goto dummy;
+      dummy: ;
+    }
+
+    //assert(dif == __simdb_allocs - __simdb_deallocs);
+    //Println("\nallocs: ", __simdb_allocs, " deallocs: ", __simdb_deallocs);
+    //std::cout << std::this_thread::get_id();
+    //printf(" allocs: %d  deallocs: %d DIFF: %d\n", __simdb_allocs, __simdb_deallocs, __simdb_allocs - __simdb_deallocs);
 
     return true;
   }
@@ -1245,7 +1498,7 @@ public:
 
     return doFree;
   }
-  VerIdx        load(u32 i)                    const
+  VerIdx        load(u32 i) const
   {    
     assert(i < m_sz);
 
@@ -1256,7 +1509,7 @@ public:
     else       return VerIdx(lo32(cur), hi32(cur));
   }
   u32         nxtIdx(u32 i) const { return (i+1)%m_sz; }
-  u32        prevIdx(u32 i) const { return std::min(i-1, m_sz-1); }        // clamp to m_sz-1 for the case that hash==0, which will result in an unsigned integer wrap
+  u32        prevIdx(u32 i) const { using namespace std; return min(i-1, m_sz-1); }        // clamp to m_sz-1 for the case that hash==0, which will result in an unsigned integer wrap - syntax errors and possible windows min/max macros make this less problematic than std::min() 
 
 };
 struct  SharedMem
@@ -1340,7 +1593,7 @@ public:
     #ifdef _WIN32      // windows
       if(raw_path)
       {
-        sm.fileHndl = CreateFile(
+        sm.fileHndl = CreateFileA(
           sm.path, 
           GENERIC_READ|GENERIC_WRITE,   //FILE_MAP_READ|FILE_MAP_WRITE,  // apparently FILE_MAP constants have no effects here
           FILE_SHARE_READ|FILE_SHARE_WRITE, 
@@ -1350,11 +1603,11 @@ public:
           NULL                          //_In_opt_ HANDLE hTemplateFile
         );
       }
-      sm.fileHndl = OpenFileMapping(FILE_MAP_READ | FILE_MAP_WRITE, FALSE, sm.path);
+      sm.fileHndl = OpenFileMappingA(FILE_MAP_READ | FILE_MAP_WRITE, FALSE, sm.path);
 
       if(sm.fileHndl==NULL)
       {
-        sm.fileHndl = CreateFileMapping(  // todo: simplify and call this right away, it will open the section if it already exists
+        sm.fileHndl = CreateFileMappingA(  // todo: simplify and call this right away, it will open the section if it already exists
           INVALID_HANDLE_VALUE,
           NULL,
           PAGE_READWRITE,
@@ -1433,7 +1686,12 @@ public:
     return move(sm);
   }
 
-  SharedMem(){}
+  SharedMem() :
+    hndlPtr(nullptr),
+    ptr(nullptr),
+    size(0),
+    owner(false)
+  {}
   SharedMem(SharedMem&)       = delete;
   SharedMem(SharedMem&& rval){ mv(std::move(rval)); }
   SharedMem& operator=(SharedMem&& rval){ mv(std::move(rval)); return *this; }
@@ -1474,7 +1732,7 @@ public:
   using  VerIdx  =  CncrHsh::VerIdx;
   using  string  =  std::string;
 
-private:
+//private:
   au32*      s_flags;
   au32*      s_cnt;
   au64*      s_blockSize;
@@ -1534,7 +1792,15 @@ private:
   }
 
 public:
-  simdb(){}
+  simdb() : 
+    m_nxtChIdx(0),
+    m_curChIdx(0),
+    m_isOpen(false),
+    s_flags(nullptr),
+    s_cnt(nullptr),
+    s_blockSize(nullptr),
+    s_blockCount(nullptr)
+  {}
   simdb(const char* name, u32 blockSize, u32 blockCount, bool raw_path=false) : 
     m_nxtChIdx(0),
     m_curChIdx(0),
@@ -1546,8 +1812,11 @@ public:
     if(error_code!=simdb_error::NO_ERRORS){ m_error = error_code; return; }
     if(!m_mem.hndlPtr){ m_error = simdb_error::SHARED_MEMORY_ERROR; return; }
 
+    //  flags     blockSize
+    // |----|----|--------|--------|     each dash ('-') represents one byte - flags is the first four, cnt is the next 4, blockSize is the next 8, blockCount is the 8 bytes after that
+    //       cnt           blockCount
     s_blockCount  =  ((au64*)m_mem.data())+2;
-    s_blockSize   =  ((au64*)m_mem.data())+1;
+    s_blockSize   =  ((au64*)m_mem.data())+1;      // 8 byte offset to be after flags and cnt 
     s_flags       =   (au32*)m_mem.data();
     s_cnt         =  ((au32*)m_mem.data())+1;
 
@@ -1564,7 +1833,7 @@ public:
     }
 
     //auto cncrHashSize = CncrHsh::sizeBytes(blockCount);
-    uint64_t cncrHashSize = CncrHsh::sizeBytes(s_blockCount->load());
+    uint64_t cncrHashSize = CncrHsh::sizeBytes((u32)s_blockCount->load());
     new (&s_cs) CncrStr( ((u8*)m_mem.data())+cncrHashSize+OffsetBytes(), 
                                  (u32)s_blockSize->load(), 
                                  (u32)s_blockCount->load(), 
@@ -1617,6 +1886,7 @@ public:
   }
   bool         put(char const* const key, const void *const val, u32 vlen, u32* out_startBlock=nullptr)
   {
+    assert(m_isOpen); // make sure if the db is being used it has been initialized
     assert(strlen(key)>0);
     return put(key, (u32)strlen(key), val, vlen, out_startBlock);
   }
@@ -1664,7 +1934,8 @@ public:
   {
     if(m_isOpen){
       m_isOpen = false;
-      u64 prev = s_flags->fetch_sub(1);                                                   // prev is previous flags value - the number of simdb instances across process that had the shared memory file open
+      //u64 prev = s_flags->fetch_sub(1);                                                   // should this be s_cnt? - prev is previous flags value - the number of simdb instances across process that had the shared memory file open
+      u64 prev = s_cnt->fetch_sub(1);                                                   // should this be s_cnt? - prev is previous flags value - the number of simdb instances across process that had the shared memory file open
       if(prev==1){                                                                        // if the previous value was 1, that means the value is now 0, and we are the last one to stop using the file, which also means we need to be the one to clean it up
         SharedMem::FreeAnon(m_mem);                                                       // close and delete the shared memory - this is done automatically on windows when all processes are no longer accessing a shared memory file
         return true;
@@ -1687,7 +1958,8 @@ public:
 
   i64          len(str    const& key, u32* out_vlen=nullptr, u32* out_version=nullptr) const
   {
-    return len( (void*)key.data(), (u32)key.length(), out_vlen, out_version);
+    //return len( (void*)key.data(), (u32)key.length(), out_vlen, out_version);
+    return len( (void*)key.c_str(), (u32)key.length(), out_vlen, out_version);
   }
   i64          put(str    const& key, str const& value)
   {
@@ -1757,10 +2029,18 @@ public:
   template<class T>
   auto         get(str const& key) -> std::vector<T>
   {
+    using namespace std;
+    
     u32 vlen = 0;
-    len(key.data(), (u32)key.length(), &vlen);
-    std::vector<T> ret(vlen);    
-    return get(key.data(), (u32)key.length(), (void*)ret.data(), vlen);
+    //u64  len = len(key.data(), (u32)key.length(), &vlen);
+    i64 l = len(key, &vlen); 
+    vector<T> ret(vlen);
+
+    u32 readLen = 0;
+    bool ok = get(key.data(), (u32)key.length(), (void*)ret.data(), vlen); // &readLen);
+
+    if(ok) return ret;
+    else   return vector<T>();
   }
   template<class T>
   i64          put(str    const& key, std::vector<T> const& val)
@@ -1786,13 +2066,18 @@ public:
     vector<string> ret;
 
     if(!NtOpenDirectoryObject){  
-      NtOpenDirectoryObject  = (NTOPENDIRECTORYOBJECT)GetLibraryProcAddress( _T("ntdll.dll"), "NtOpenDirectoryObject");
+      //NtOpenDirectoryObject  = (NTOPENDIRECTORYOBJECT)GetLibraryProcAddress( _T("ntdll.dll"), "NtOpenDirectoryObject");
+      //NtOpenDirectoryObject  = (NTOPENDIRECTORYOBJECT)GetLibraryProcAddress( (PSTR)_T("ntdll.dll"), (PSTR)_T("NtOpenDirectoryObject") );
+      NtOpenDirectoryObject  = (NTOPENDIRECTORYOBJECT)GetLibraryProcAddress( (PSTR)"ntdll.dll", (PSTR)"NtOpenDirectoryObject" );
     }
     if(!NtQueryDirectoryObject){ 
-      NtQueryDirectoryObject = (NTQUERYDIRECTORYOBJECT)GetLibraryProcAddress(_T("ntdll.dll"), "NtQueryDirectoryObject");
+      //NtQueryDirectoryObject = (NTQUERYDIRECTORYOBJECT)GetLibraryProcAddress(_T("ntdll.dll"), "NtQueryDirectoryObject");
+      //NtQueryDirectoryObject = (NTQUERYDIRECTORYOBJECT)GetLibraryProcAddress( (PSTR)_T("ntdll.dll"), (PSTR)_T("NtQueryDirectoryObject") );
+      NtQueryDirectoryObject = (NTQUERYDIRECTORYOBJECT)GetLibraryProcAddress( (PSTR)"ntdll.dll", (PSTR)"NtQueryDirectoryObject");
     }
     if(!NtOpenFile){ 
-      NtOpenFile = (NTOPENFILE)GetLibraryProcAddress(_T("ntdll.dll"), "NtOpenFile");
+      //NtOpenFile = (NTOPENFILE)GetLibraryProcAddress( (PSTR)_T("ntdll.dll"), (PSTR)_T("NtOpenFile") );
+      NtOpenFile = (NTOPENFILE)GetLibraryProcAddress( (PSTR)"ntdll.dll", (PSTR)"NtOpenFile" );
     }
 
     HANDLE     hDir = NULL;
@@ -1891,3 +2176,114 @@ public:
 #endif
 
 
+
+
+
+
+
+
+// return empty;  // should never be reached
+//
+//Match cmp = runIfMatch(vi, key, klen, hash, f);
+//Match cmp = m_csp->compare(vi.idx,vi.version,key,klen,hash);
+//bool success = cmpex_vi(i, vi, desired);  // this should be hit even when the the versions don't match, since m_csp->compare() will return MATCH_TRUE_WRONG_VERSION
+
+//u32 cur=blkIdx, prev=blkIdx;   // the first index will have its version set twice
+//while(cur != LIST_END){
+//  s_bls[prev].version = version;
+//  prev = cur;
+//  cur  = s_bls[cur].idx;
+//}
+//return prev;
+
+//auto        alloc(u32    size, u32 klen, u32 hash, BlkCnt* out_blocks=nullptr) -> VerIdx    
+//{
+//  u32  byteRem = 0;
+//  u32   blocks = blocksNeeded(size, &byteRem);
+//  u32       st = s_cl.nxt();
+//  SECTION(get the starting block index and handle errors)
+//  {
+//    if(st==LIST_END){
+//      if(out_blocks){ *out_blocks = {1, 0} ; } 
+//      return List_End(); 
+//    }
+//  }
+//
+//  u32  ver = (u32)s_version->fetch_add(1);
+//  u32  cur = st;
+//  u32  nxt = 0;
+//  u32  cnt = 0;
+//  SECTION(loop for the number of blocks needed and get new block and link it to the list)
+//  {
+//    for(u32 i=0; i<blocks-1; ++i)
+//    {
+//      nxt = s_cl.nxt(cur);
+//      if(nxt==LIST_END){ 
+//        free(st, ver); 
+//        return List_End();
+//        //VerIdx empty={LIST_END,0};  // todo: use empty() for this? 
+//        //return empty; 
+//      } // todo: will this free the start if the start was never set? - will it just reset the blocks but free the index?
+//
+//      s_bls[cur] = BlkLst(false, 0, nxt, ver, size);
+//      //s_cl[cur]  = nxt;
+//      cur        = nxt;
+//      ++cnt;
+//    }
+//  }
+//
+//  SECTION(add the last index into the list, set out_blocks and return the start index with its version)
+//  {      
+//    s_cl.s_lv[cur] = LIST_END;
+//    s_bls[cur] = BlkLst(false,0,LIST_END,ver,size,0,0);       // if there is only one block needed, cur and st could be the same
+//
+//    auto b = s_bls[st]; // debugging
+//
+//    s_bls[st].isKey = true;
+//    s_bls[st].hash  = hash;
+//    s_bls[st].len   = size;
+//    s_bls[st].klen  = klen;
+//    s_bls[st].isDeleted = false;
+//
+//    if(out_blocks){
+//      out_blocks->end = nxt==LIST_END;
+//      out_blocks->cnt = cnt;
+//    }     
+//    VerIdx vi(st, ver);
+//    return vi;
+//  }
+//}
+
+//s_cl.s_lv[cur] = LIST_END;
+//
+//u32       st = s_cl.nxt();
+//u32  nxt = 0;
+//
+//nxt = s_cl.nxt(cur);
+//if(nxt==LIST_END){ 
+//  free(st, ver); 
+//  return List_End();
+//} // todo: will this free the start if the start was never set? - will it just reset the blocks but free the index?
+//
+//s_bls[cur] = BlkLst(false, 0, nxt, ver, size);
+//cur        = nxt;
+
+//VerIdx empty={LIST_END,0};  // todo: use empty() for this? 
+//return empty; 
+//
+//s_cl[cur]  = nxt;
+
+//u32 findEndSetVersion(u32  blkIdx, u32 version)  const                  // find the last BlkLst slot in the linked list of blocks to free 
+//{
+//  u32 cur=blkIdx, prev=blkIdx;
+//  while(cur != LIST_END){
+//    s_bls[prev].version = version;
+//    prev = cur;
+//    cur  = s_bls[cur].idx;
+//  }
+//
+//  return prev;
+//}
+
+//
+//u32        prevIdx(u32 i) const { return std::min(i-1, m_sz-1); }        // clamp to m_sz-1 for the case that hash==0, which will result in an unsigned integer wrap
