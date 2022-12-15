@@ -485,9 +485,11 @@ public:
     }
   }
 
-  bool headCmpEx(u64* expected, au64 desired)
+  bool headCmpEx(u64* expected, u64* desired)
   {
     using namespace std;
+
+    au64 desired_au64 = au64(*desired);
 
     //return atomic_compare_exchange_strong_explicit(
     //  s_h, (volatile au64*)&expected, desired,
@@ -499,7 +501,7 @@ public:
     //);
 
     return atomic_compare_exchange_strong_explicit(
-      s_h, expected, desired,
+      s_h, expected, desired_au64,
       memory_order_seq_cst, memory_order_seq_cst
     );
   }
@@ -514,8 +516,8 @@ public:
 
       nxtHead.idx  =  s_lv[curHead.idx];
       nxtHead.ver  =  curHead.ver==NXT_VER_SPECIAL? 1  :  curHead.ver+1;
-    }while( !headCmpEx( &curHead.asInt, nxtHead.asInt) );
-    //}while( !headCmpEx(curHead.asInt, nxtHead.asInt) );
+    }while( !headCmpEx( &curHead.asInt, &nxtHead.asInt) );
+    //}while( !headCmpEx(curHead.asInt, &nxtHead.asInt) );
     //}while( !s_h->compare_exchange_strong(curHead.asInt, nxtHead.asInt) );
 
     return curHead.idx;
@@ -534,8 +536,8 @@ public:
       prevHead     =  curHead;
       nxtHead.idx  =  s_lv[curHead.idx];
       nxtHead.ver  =  curHead.ver==NXT_VER_SPECIAL? 1  :  curHead.ver+1;
-    }while( !headCmpEx( &curHead.asInt, nxtHead.asInt) );
-    //}while( !headCmpEx(curHead.asInt, nxtHead.asInt) );
+    }while( !headCmpEx( &curHead.asInt, &nxtHead.asInt) );
+    //}while( !headCmpEx(curHead.asInt, &nxtHead.asInt) );
     //}while( !s_h->compare_exchange_strong(curHead.asInt, nxtHead.asInt) );
 
     //s_lv[prev] = curHead.idx;
@@ -551,8 +553,8 @@ public:
       retIdx = s_lv[idx] = curHead.idx;
       nxtHead.idx  =  idx;
       nxtHead.ver  =  curHead.ver + 1;
-    }while( !headCmpEx( &curHead.asInt, nxtHead.asInt) );
-    //}while( !headCmpEx(curHead.asInt, nxtHead.asInt) );
+    }while( !headCmpEx( &curHead.asInt, &nxtHead.asInt) );
+    //}while( !headCmpEx(curHead.asInt, &nxtHead.asInt) );
     //}while( !s_h->compare_exchange_strong(curHead.asInt, nxtHead.asInt) );
 
     return retIdx;
@@ -570,8 +572,8 @@ public:
       //atomic_store( (au32*)&(s_lv[en]), curHead.idx);
       nxtHead.idx  =  st;
       nxtHead.ver  =  curHead.ver + 1;
-    }while( !headCmpEx( &curHead.asInt, nxtHead.asInt) );
-    //}while( !headCmpEx(curHead.asInt, nxtHead.asInt) );
+    }while( !headCmpEx( &curHead.asInt, &nxtHead.asInt) );
+    //}while( !headCmpEx(curHead.asInt, &nxtHead.asInt) );
     //}while( !s_h->compare_exchange_strong(curHead.asInt, nxtHead.asInt) );
 
     return retIdx;
@@ -1344,7 +1346,7 @@ public:
   }
 
   template<class FUNC, class T>
-  bool      runMatch(const void *const key, u32 klen, u32 hash, FUNC f, T defaultRet = decltype(f(vi))() )       const 
+  bool      runMatch(const void *const key, u32 klen, u32 hash, FUNC f, T defaultRet = decltype(f(VerIdx()))() )       const 
   {
     using namespace std;
     
