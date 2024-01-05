@@ -1344,7 +1344,7 @@ public:
   }
 
   template<class FUNC, class T>
-  bool      runMatch(const void *const key, u32 klen, u32 hash, FUNC f, T defaultRet = decltype(f(vi))() )       const 
+  bool      runMatch(const void *const key, u32 klen, u32 hash, FUNC f, T defaultRet = decltype(f(VerIdx()))() )       const 
   {
     using namespace std;
     
