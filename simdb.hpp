@@ -221,8 +221,13 @@
 #endif
 
 //#ifndef NDEBUG
+#ifdef WINDOWS
+  __declspec(selectany) thread_local int __simdb_allocs   = 0;
+  __declspec(selectany) thread_local int __simdb_deallocs = 0;
+#elif
   thread_local int __simdb_allocs   = 0;
   thread_local int __simdb_deallocs = 0;
+#endif
 //#endif
 
 namespace {
