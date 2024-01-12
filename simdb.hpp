@@ -221,8 +221,13 @@
 #endif
 
 //#ifndef NDEBUG
+#ifdef WINDOWS
+  __declspec(selectany) thread_local int __simdb_allocs   = 0;
+  __declspec(selectany) thread_local int __simdb_deallocs = 0;
+#elif
   thread_local int __simdb_allocs   = 0;
   thread_local int __simdb_deallocs = 0;
+#endif
 //#endif
 
 namespace {
@@ -1344,7 +1349,7 @@ public:
   }
 
   template<class FUNC, class T>
-  bool      runMatch(const void *const key, u32 klen, u32 hash, FUNC f, T defaultRet = decltype(f(vi))() )       const 
+  bool      runMatch(const void *const key, u32 klen, u32 hash, FUNC f, T defaultRet = decltype(f(VerIdx()))() )       const 
   {
     using namespace std;
     
